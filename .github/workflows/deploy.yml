@@ -1,0 +1,28 @@
+name: Onboard Dealer
+
+on:
+  repository_dispatch:
+    types: [onboard-dealer]
+
+jobs:
+  onboard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout orchestrator
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install @octokit/rest libsodium-wrappers
+
+      - name: Run onboarding script
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEALER_PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: node onboard.js
