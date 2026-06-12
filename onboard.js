@@ -19,8 +19,9 @@ const payload     = JSON.parse(process.env.DEALER_PAYLOAD);
 const {
   key, name, branch, domains,
   primary, gradEnd, label, tagline,
-  showDeposit, showFinance, showParams,
 } = payload;
+
+const showDeposit = true, showFinance = true, showParams = true;
 
 const octokit = new Octokit({ auth: ghToken });
 
