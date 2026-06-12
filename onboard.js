@@ -17,7 +17,7 @@ const cfAccountId = process.env.CF_ACCOUNT_ID;
 const payload     = JSON.parse(process.env.DEALER_PAYLOAD);
 
 const {
-  key, name, branch, domains, mixpanel,
+  key, name, branch, domains,
   primary, gradEnd, label, tagline,
   showDeposit, showFinance, showParams,
 } = payload;
@@ -79,7 +79,7 @@ async function main() {
     allowedDomains: [
       ${domainsStr},
     ],
-    mixpanelToken: '${mixpanel}',
+    mixpanelToken: '',
     theme: {
       primary: '${primary}',
       gradient: 'linear-gradient(135deg, ${primary} 0%, ${gradEnd} 100%)',
@@ -203,7 +203,7 @@ export const DEALERS: Record<string, DealerEntry> = {
     name: '${name}',
     branchCode: '${branch}',
     allowedDomains: [${domains.map(d => `'${d}'`).join(', ')}],
-    mixpanelToken: '${mixpanel}',
+    mixpanelToken: '',
     theme: {
       primary: '${primary}',
       gradient: 'linear-gradient(135deg, ${primary} 0%, ${gradEnd} 100%)',
