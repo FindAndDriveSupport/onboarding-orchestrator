@@ -4,7 +4,9 @@
  */
 
 import { Octokit } from '@octokit/rest';
-import sodium from 'libsodium-wrappers';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const sodium = require('libsodium-wrappers');
 
 const GH_ORG       = 'FindAndDriveSupport';
 const TEMPLATE_REPO = 'e-fficient-ui';
