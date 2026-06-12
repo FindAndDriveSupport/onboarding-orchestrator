@@ -81,6 +81,7 @@ async function main() {
     branchCode: '${branch}',
     allowedDomains: [
       ${domainsStr},
+      'e-fficient-ui-${key}.still-fire-1c3d.workers.dev',
     ],
     mixpanelToken: '',
     theme: {
@@ -125,29 +126,34 @@ async function main() {
   const configSha = await getFileSha(repoName, 'src/config/dealerConfig.ts');
   await commitFile(repoName, 'src/config/dealerConfig.ts', buildDealerConfig(), `chore: configure dealer ${key}`, configSha);
 
-  // 4. Commit wrangler.toml
+  // 4. Commit DealerContext.tsx
+  console.log('⚙️  Committing DealerContext.tsx...');
+  const dealerContextSha = await getFileSha(repoName, 'src/contexts/DealerContext.tsx');
+  await commitFile(repoName, 'src/contexts/DealerContext.tsx', buildDealerContext(), `chore: update DealerContext to read from dealerConfig`, dealerContextSha);
+
+  // 5. Commit wrangler.toml
   console.log('⚙️  Committing wrangler.toml...');
   const wranglerSha = await getFileSha(repoName, 'wrangler.toml');
   const wranglerContent = `name       = "e-fficient-ui-${key}"\nmain       = "dist/server/server.js"\ncompatibility_date = "2024-01-01"\ncompatibility_flags = ["nodejs_compat"]\nassets = { directory = "dist/client" }\n\n[vars]\nNODE_ENV = "production"\n`;
   await commitFile(repoName, 'wrangler.toml', wranglerContent, `chore: set wrangler name for ${key}`, wranglerSha);
 
-  // 5. Commit .env
+  // 6. Commit .env
   console.log('⚙️  Committing .env...');
   const envSha = await getFileSha(repoName, '.env');
   const envContent = `VITE_WORKER_URL=https://efficient-finance-widget.still-fire-1c3d.workers.dev\nVITE_DEFAULT_DEALER=${key}\n`;
   await commitFile(repoName, '.env', envContent, `chore: set env vars for ${key}`, envSha);
 
-  // 6. Commit GitHub Actions workflow
+  // 7. Commit GitHub Actions workflow
   console.log('⚙️  Committing deploy workflow...');
   const workflowSha = await getFileSha(repoName, '.github/workflows/deploy.yml');
   await commitFile(repoName, '.github/workflows/deploy.yml', buildWorkflow(), `ci: add Cloudflare Workers deploy workflow`, workflowSha);
 
-  // 7. Set GitHub secrets
+  // 8. Set GitHub secrets
   console.log('🔐 Setting GitHub secrets...');
   await setSecret(repoName, 'CLOUDFLARE_API_TOKEN', cfToken);
   await setSecret(repoName, 'CLOUDFLARE_ACCOUNT_ID', cfAccountId);
 
-  // 8. Trigger first deployment
+  // 9. Trigger first deployment
   console.log('🚀 Triggering first deployment...');
   await sleep(2000);
   try {
@@ -263,6 +269,73 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: \${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: \${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+`;
+}
+
+function buildDealerContext() {
+  return `import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEmbed } from "./EmbedContext";
+import { getDealerConfig } from "@/config/dealerConfig";
+
+export interface DealerTheme {
+  primary?: string;
+  primaryLight?: string;
+  primaryDark?: string;
+  gradient?: string;
+  fontFamily?: string;
+  borderRadius?: string;
+  logoUrl?: string;
+}
+
+export interface DealerFeatures {
+  showDeposit: boolean;
+  showCurrentFinance: boolean;
+  vehicleQueryParams: boolean;
+}
+
+export interface DealerConfig {
+  key: string;
+  name: string;
+  theme: DealerTheme;
+  features: DealerFeatures;
+  mixpanelToken?: string;
+}
+
+const DEFAULT_CONFIG: DealerConfig = {
+  key: "default",
+  name: "Vehicle Finance",
+  theme: {},
+  features: { showDeposit: true, showCurrentFinance: true, vehicleQueryParams: true },
+};
+
+const DealerContext = createContext<DealerConfig>(DEFAULT_CONFIG);
+
+export function DealerProvider({ children }: { children: ReactNode }) {
+  const { dealer } = useEmbed();
+  const [config, setConfig] = useState<DealerConfig>(DEFAULT_CONFIG);
+
+  useEffect(() => {
+    // Read config from dealerConfig.ts — no API call needed
+    const dealerConfig = getDealerConfig(dealer);
+    setConfig(dealerConfig);
+
+    // Apply theme CSS vars to document root
+    const t = dealerConfig.theme || {};
+    const root = document.documentElement;
+    if (t.primary)      root.style.setProperty("--dealer-primary", t.primary);
+    if (t.gradient)     root.style.setProperty("--gradient-primary", t.gradient);
+    if (t.borderRadius) root.style.setProperty("--radius", t.borderRadius);
+    if (t.fontFamily)   root.style.setProperty("--font-family", t.fontFamily);
+  }, [dealer]);
+
+  const value = useMemo(() => config, [config]);
+
+  return <DealerContext.Provider value={value}>{children}</DealerContext.Provider>;
+}
+
+export function useDealer() {
+  return useContext(DealerContext);
+}
 `;
 }
 
