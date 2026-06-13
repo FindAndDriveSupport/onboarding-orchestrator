@@ -21,6 +21,7 @@ const payload     = JSON.parse(process.env.DEALER_PAYLOAD);
 const {
   key, name, branch, domains,
   primary, gradEnd, label, tagline,
+  financeType, seritiKey, seritiSecret,
 } = payload;
 
 const showDeposit = true, showFinance = true, showParams = true;
@@ -81,9 +82,10 @@ async function main() {
     branchCode: '${branch}',
     allowedDomains: [
       ${domainsStr},
-      'e-fficient-ui-${key}.still-fire-1c3d.workers.dev',
+      'seritifinance.findndrive.co.za',
     ],
     mixpanelToken: '',
+    financeType: '${financeType || "vehicle"}',
     theme: {
       primary: '${primary}',
       gradient: 'linear-gradient(135deg, ${primary} 0%, ${gradEnd} 100%)',
@@ -140,7 +142,7 @@ async function main() {
   // 6. Commit .env
   console.log('⚙️  Committing .env...');
   const envSha = await getFileSha(repoName, '.env');
-  const envContent = `VITE_WORKER_URL=https://efficient-finance-widget.still-fire-1c3d.workers.dev\nVITE_DEFAULT_DEALER=${key}\n`;
+  const envContent = `VITE_WORKER_URL=https://seritifinance.findndrive.co.za/api\nVITE_DEFAULT_DEALER=${key}\n`;
   await commitFile(repoName, '.env', envContent, `chore: set env vars for ${key}`, envSha);
 
   // 7. Commit GitHub Actions workflow
@@ -153,7 +155,52 @@ async function main() {
   await setSecret(repoName, 'CLOUDFLARE_API_TOKEN', cfToken);
   await setSecret(repoName, 'CLOUDFLARE_ACCOUNT_ID', cfAccountId);
 
-  // 9. Trigger first deployment
+  // 9. Store Seriti credentials in Cloudflare KV
+  console.log('🔐 Storing Seriti credentials in KV...');
+  if (seritiKey && seritiSecret) {
+    const kvNamespaceId = '16c7bf807bc0445ab0420a16f2352c0d'; // SERITI_CACHE KV namespace
+    const cfBase = `https://api.cloudflare.com/client/v4/accounts/${cfAccountId}/storage/kv/namespaces/${kvNamespaceId}/values`;
+    await fetch(`${cfBase}/SERITI_KEY_${key}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${cfToken}`, 'Content-Type': 'text/plain' },
+      body: seritiKey,
+    });
+    await fetch(`${cfBase}/SERITI_SECRET_${key}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${cfToken}`, 'Content-Type': 'text/plain' },
+      body: seritiSecret,
+    });
+    console.log('✅ Seriti credentials stored in KV');
+  }
+
+  // 10. Add Cloudflare Worker route for custom domain
+  console.log('🌐 Adding Cloudflare Worker route...');
+  try {
+    const zoneRes = await fetch(
+      `https://api.cloudflare.com/client/v4/zones?name=findndrive.co.za`,
+      { headers: { Authorization: `Bearer ${cfToken}` } }
+    );
+    const zoneData = await zoneRes.json();
+    const zoneId = zoneData.result?.[0]?.id;
+    if (zoneId) {
+      await fetch(
+        `https://api.cloudflare.com/client/v4/zones/${zoneId}/workers/routes`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${cfToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pattern: `seritifinance.findndrive.co.za/dealer/${key}/*`,
+            script: `e-fficient-ui-${key}`,
+          }),
+        }
+      );
+      console.log(`✅ Route added: seritifinance.findndrive.co.za/dealer/${key}/*`);
+    }
+  } catch (e) {
+    console.log('⚠️  Could not add route automatically:', e.message);
+  }
+
+  // 11. Trigger first deployment
   console.log('🚀 Triggering first deployment...');
   await sleep(2000);
   try {
@@ -213,6 +260,7 @@ export const DEALERS: Record<string, DealerEntry> = {
     branchCode: '${branch}',
     allowedDomains: [${domains.map(d => `'${d}'`).join(', ')}],
     mixpanelToken: '',
+    financeType: '${financeType || "vehicle"}',
     theme: {
       primary: '${primary}',
       gradient: 'linear-gradient(135deg, ${primary} 0%, ${gradEnd} 100%)',
@@ -261,7 +309,7 @@ jobs:
       - name: Build
         run: bun run build
         env:
-          VITE_WORKER_URL: https://efficient-finance-widget.still-fire-1c3d.workers.dev
+          VITE_WORKER_URL: https://seritifinance.findndrive.co.za/api
           VITE_DEFAULT_DEALER: ${key}
 
       - name: Deploy to Cloudflare Workers
