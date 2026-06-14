@@ -20,7 +20,7 @@ const payload     = JSON.parse(process.env.DEALER_PAYLOAD);
 
 const {
   key, name, branch, domains,
-  primary, gradEnd, label, tagline,
+  primary, label, tagline,
   financeType, seritiKey, seritiSecret,
 } = payload;
 
