@@ -263,7 +263,7 @@ export const DEALERS: Record<string, DealerEntry> = {
     financeType: '${financeType || "vehicle"}',
     theme: {
       primary: '${primary}',
-      gradient: 'linear-gradient(135deg, ${primary} 0%, ${gradEnd} 100%)',
+      gradient: 'linear-gradient(135deg, ${primary} 0%, ${primary} 100%)',
       fontFamily: "'Inter', sans-serif",
       borderRadius: '12px',
     },
