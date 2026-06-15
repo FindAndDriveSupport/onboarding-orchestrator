@@ -75,8 +75,12 @@ async function main() {
     owner: GH_ORG, repo: BACKEND_REPO, path: BACKEND_FILE,
   });
   const currentContent = Buffer.from(fileData.content, 'base64').toString('utf8');
-  const domainsStr = domains.map(d => `'${d}'`).join(',\n      ');
-  const newEntry = `
+
+  if (currentContent.includes(`'${key}': {`)) {
+    console.log(`ℹ️  Dealer entry '${key}' already exists in dealers.config.js — skipping backend config update`);
+  } else {
+    const domainsStr = domains.map(d => `'${d}'`).join(',\n      ');
+    const newEntry = `
   '${key}': {
     name: '${name}',
     branchCode: '${branch}',
@@ -99,8 +103,9 @@ async function main() {
     },
   },
 `;
-  const updatedContent = currentContent.replace(/(\/\/ ── Lookup helpers)/, newEntry + '$1');
-  await commitFile(BACKEND_REPO, BACKEND_FILE, updatedContent, `feat: add dealer ${key}`, fileData.sha);
+    const updatedContent = currentContent.replace(/(\/\/ ── Lookup helpers)/, newEntry + '$1');
+    await commitFile(BACKEND_REPO, BACKEND_FILE, updatedContent, `feat: add dealer ${key}`, fileData.sha);
+  }
 
   // 2. Create frontend repo from template
   console.log('📦 Creating frontend repo...');
