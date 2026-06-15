@@ -178,7 +178,27 @@ async function main() {
     console.log('✅ Seriti credentials stored in KV');
   }
 
-  // 10. Add Cloudflare Custom Domain for this dealer's subdomain
+  // 10. Trigger first deployment (must happen before Custom Domain step,
+  //     since the Worker must exist in Cloudflare before a domain can be bound to it)
+  console.log('🚀 Triggering first deployment...');
+  await sleep(2000);
+  try {
+    await octokit.actions.createWorkflowDispatch({
+      owner: GH_ORG, repo: repoName,
+      workflow_id: 'deploy.yml',
+      ref: 'main',
+    });
+    console.log('✅ Deployment triggered');
+  } catch (e) {
+    console.log('⚠️  Could not trigger workflow dispatch — it will run on next push');
+  }
+
+  // Wait for the deploy workflow to complete before attempting to bind a custom domain.
+  // A fresh repo's first build (install + build + deploy) typically takes ~60-90s.
+  console.log('⏳ Waiting for deployment to complete before binding custom domain...');
+  await sleep(90000);
+
+  // 11. Add Cloudflare Custom Domain for this dealer's subdomain
   console.log('🌐 Adding Cloudflare Custom Domain...');
   try {
     const zoneRes = await fetch(
@@ -206,24 +226,11 @@ async function main() {
         console.log(`✅ Custom domain added: ${hostname}`);
       } else {
         console.log(`⚠️  Custom domain response:`, JSON.stringify(domainData.errors || domainData));
+        console.log(`ℹ️  If this failed because the Worker doesn't exist yet, re-run this workflow once the deploy has completed — step 1 and steps 3-9 will skip/upsert harmlessly.`);
       }
     }
   } catch (e) {
     console.log('⚠️  Could not add custom domain automatically:', e.message);
-  }
-
-  // 11. Trigger first deployment
-  console.log('🚀 Triggering first deployment...');
-  await sleep(2000);
-  try {
-    await octokit.actions.createWorkflowDispatch({
-      owner: GH_ORG, repo: repoName,
-      workflow_id: 'deploy.yml',
-      ref: 'main',
-    });
-    console.log('✅ Deployment triggered');
-  } catch (e) {
-    console.log('⚠️  Could not trigger workflow dispatch — it will run on next push');
   }
 
   console.log(`\n✅ Dealer ${name} onboarded successfully!\n`);
