@@ -178,8 +178,8 @@ async function main() {
     console.log('✅ Seriti credentials stored in KV');
   }
 
-  // 10. Add Cloudflare Worker route for custom domain
-  console.log('🌐 Adding Cloudflare Worker route...');
+  // 10. Add Cloudflare Custom Domain for this dealer's subdomain
+  console.log('🌐 Adding Cloudflare Custom Domain...');
   try {
     const zoneRes = await fetch(
       `https://api.cloudflare.com/client/v4/zones?name=findndrive.co.za`,
@@ -188,21 +188,29 @@ async function main() {
     const zoneData = await zoneRes.json();
     const zoneId = zoneData.result?.[0]?.id;
     if (zoneId) {
-      await fetch(
-        `https://api.cloudflare.com/client/v4/zones/${zoneId}/workers/routes`,
+      const hostname = `${key}.seritifinance.findndrive.co.za`;
+      const domainRes = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${cfAccountId}/workers/domains`,
         {
-          method: 'POST',
+          method: 'PUT',
           headers: { Authorization: `Bearer ${cfToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            pattern: `seritifinance.findndrive.co.za/dealer/${key}/*`,
-            script: `e-fficient-ui-${key}`,
+            hostname,
+            zone_id: zoneId,
+            service: `e-fficient-ui-${key}`,
+            environment: 'production',
           }),
         }
       );
-      console.log(`✅ Route added: seritifinance.findndrive.co.za/dealer/${key}/*`);
+      const domainData = await domainRes.json();
+      if (domainData.success) {
+        console.log(`✅ Custom domain added: ${hostname}`);
+      } else {
+        console.log(`⚠️  Custom domain response:`, JSON.stringify(domainData.errors || domainData));
+      }
     }
   } catch (e) {
-    console.log('⚠️  Could not add route automatically:', e.message);
+    console.log('⚠️  Could not add custom domain automatically:', e.message);
   }
 
   // 11. Trigger first deployment
