@@ -259,6 +259,7 @@ export interface DealerEntry {
   branchCode: string;
   allowedDomains: string[];
   mixpanelToken?: string;
+  financeType?: string;
   theme: DealerTheme;
   features: DealerFeatures;
 }
@@ -269,6 +270,7 @@ export interface DealerConfig {
   branchCode: string;
   allowedDomains: string[];
   mixpanelToken?: string;
+  financeType?: string;
   theme: DealerTheme;
   features: DealerFeatures;
 }
@@ -366,6 +368,7 @@ export interface DealerConfig {
   theme: DealerTheme;
   features: DealerFeatures;
   mixpanelToken?: string;
+  financeType?: string;
 }
 
 const DEFAULT_CONFIG: DealerConfig = {
