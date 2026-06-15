@@ -198,7 +198,6 @@ async function main() {
             hostname,
             zone_id: zoneId,
             service: `e-fficient-ui-${key}`,
-            environment: 'production',
           }),
         }
       );
