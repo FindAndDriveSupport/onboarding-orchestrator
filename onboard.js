@@ -147,7 +147,7 @@ async function main() {
   // 6. Commit .env
   console.log('⚙️  Committing .env...');
   const envSha = await getFileSha(repoName, '.env');
-  const envContent = `VITE_WORKER_URL=https://seritifinance.findndrive.co.za/api\nVITE_DEFAULT_DEALER=${key}\n`;
+  const envContent = `VITE_WORKER_URL=https://seritifinance.findndrive.co.za\nVITE_DEFAULT_DEALER=${key}\n`;
   await commitFile(repoName, '.env', envContent, `chore: set env vars for ${key}`, envSha);
 
   // 7. Commit GitHub Actions workflow
@@ -322,7 +322,7 @@ jobs:
       - name: Build
         run: bun run build
         env:
-          VITE_WORKER_URL: https://seritifinance.findndrive.co.za/api
+          VITE_WORKER_URL: https://seritifinance.findndrive.co.za
           VITE_DEFAULT_DEALER: ${key}
 
       - name: Deploy to Cloudflare Workers
