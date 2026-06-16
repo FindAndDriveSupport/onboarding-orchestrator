@@ -84,12 +84,12 @@ async function main() {
   '${key}': {
     name: '${name}',
     branchCode: '${branch}',
+    financeType: '${financeType || "vehicle"}',
     allowedDomains: [
       ${domainsStr},
+      '${key}.seritifinance.findndrive.co.za',
       'seritifinance.findndrive.co.za',
     ],
-    mixpanelToken: '',
-    financeType: '${financeType || "vehicle"}',
     theme: {
       primary: '${primary}',
       gradient: 'linear-gradient(135deg, ${primary} 0%, ${primary} 100%)',
@@ -258,7 +258,6 @@ export interface DealerEntry {
   name: string;
   branchCode: string;
   allowedDomains: string[];
-  mixpanelToken?: string;
   financeType?: string;
   theme: DealerTheme;
   features: DealerFeatures;
@@ -269,7 +268,6 @@ export interface DealerConfig {
   name: string;
   branchCode: string;
   allowedDomains: string[];
-  mixpanelToken?: string;
   financeType?: string;
   theme: DealerTheme;
   features: DealerFeatures;
@@ -279,9 +277,8 @@ export const DEALERS: Record<string, DealerEntry> = {
   '${key}': {
     name: '${name}',
     branchCode: '${branch}',
-    allowedDomains: [${domains.map(d => `'${d}'`).join(', ')}],
-    mixpanelToken: '',
     financeType: '${financeType || "vehicle"}',
+    allowedDomains: [${domains.map(d => `'${d}'`).join(', ')}, '${key}.seritifinance.findndrive.co.za'],
     theme: {
       primary: '${primary}',
       gradient: 'linear-gradient(135deg, ${primary} 0%, ${primary} 100%)',
@@ -367,7 +364,6 @@ export interface DealerConfig {
   name: string;
   theme: DealerTheme;
   features: DealerFeatures;
-  mixpanelToken?: string;
   financeType?: string;
 }
 
