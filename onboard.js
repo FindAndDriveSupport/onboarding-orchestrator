@@ -85,6 +85,7 @@ async function main() {
     name: '${name}',
     branchCode: '${branch}',
     financeType: '${financeType || "vehicle"}',
+    edithEnv: 'prod',
     allowedDomains: [
       ${domainsStr},
       '${key}.seritifinance.findndrive.co.za',
