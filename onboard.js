@@ -142,7 +142,7 @@ async function main() {
   // 5. Commit wrangler.toml
   console.log('⚙️  Committing wrangler.toml...');
   const wranglerSha = await getFileSha(repoName, 'wrangler.toml');
-  const wranglerContent = `name       = "e-fficient-ui-${key}"\nmain       = "dist/server/server.js"\ncompatibility_date = "2024-01-01"\ncompatibility_flags = ["nodejs_compat"]\nassets = { directory = "dist/client" }\n\n[vars]\nNODE_ENV = "production"\n`;
+  const wranglerContent = `name       = "e-fficient-ui-${key}"\nmain       = "dist/server/server.js"\ncompatibility_date = "2024-01-01"\ncompatibility_flags = ["nodejs_compat"]\nassets = { directory = "dist/client" }\ntail_consumers = [{ service = "alert-worker" }]\n\n[vars]\nNODE_ENV = "production"\n`;
   await commitFile(repoName, 'wrangler.toml', wranglerContent, `chore: set wrangler name for ${key}`, wranglerSha);
 
   // 6. Commit .env
