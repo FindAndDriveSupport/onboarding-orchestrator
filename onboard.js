@@ -142,7 +142,7 @@ async function main() {
   // 5. Commit wrangler.toml
   console.log('⚙️  Committing wrangler.toml...');
   const wranglerSha = await getFileSha(repoName, 'wrangler.toml');
-  const wranglerContent = `name       = "e-fficient-ui-${key}"\nmain       = "dist/server/server.js"\ncompatibility_date = "2024-01-01"\ncompatibility_flags = ["nodejs_compat"]\nassets = { directory = "dist/client" }\ntail_consumers = [{ service = "alert-worker" }]\n\n[vars]\nNODE_ENV = "production"\n`;
+  const wranglerContent = `name       = "e-fficient-ui-${key}"\nmain       = "dist/server/server.js"\ncompatibility_date = "2024-01-01"\ncompatibility_flags = ["nodejs_compat"]\nassets = { directory = "dist/client" }\ntail_consumers = [{ service = "alert-worker" }]\n\n[vars]\nNODE_ENV = "production"\n\n[observability.logs]\nenabled = true\ninvocation_logs = true\n`;
   await commitFile(repoName, 'wrangler.toml', wranglerContent, `chore: set wrangler name for ${key}`, wranglerSha);
 
   // 6. Commit .env
@@ -179,8 +179,7 @@ async function main() {
     console.log('✅ Seriti credentials stored in KV');
   }
 
-  // 10. Trigger first deployment (must happen before Custom Domain step,
-  //     since the Worker must exist in Cloudflare before a domain can be bound to it)
+  // 10. Trigger first deployment
   console.log('🚀 Triggering first deployment...');
   await sleep(2000);
   try {
@@ -194,12 +193,10 @@ async function main() {
     console.log('⚠️  Could not trigger workflow dispatch — it will run on next push');
   }
 
-  // Wait for the deploy workflow to complete before attempting to bind a custom domain.
-  // A fresh repo's first build (install + build + deploy) typically takes ~60-90s.
   console.log('⏳ Waiting for deployment to complete before binding custom domain...');
   await sleep(90000);
 
-  // 11. Add Cloudflare Custom Domain for this dealer's subdomain
+  // 11. Add Cloudflare Custom Domain
   console.log('🌐 Adding Cloudflare Custom Domain...');
   try {
     const zoneRes = await fetch(
@@ -227,7 +224,6 @@ async function main() {
         console.log(`✅ Custom domain added: ${hostname}`);
       } else {
         console.log(`⚠️  Custom domain response:`, JSON.stringify(domainData.errors || domainData));
-        console.log(`ℹ️  If this failed because the Worker doesn't exist yet, re-run this workflow once the deploy has completed — step 1 and steps 3-9 will skip/upsert harmlessly.`);
       }
     }
   } catch (e) {
@@ -258,8 +254,8 @@ export interface DealerFeatures {
 export interface DealerEntry {
   name: string;
   branchCode: string;
+  financeType: string;
   allowedDomains: string[];
-  financeType?: string;
   theme: DealerTheme;
   features: DealerFeatures;
 }
@@ -268,8 +264,8 @@ export interface DealerConfig {
   key: string;
   name: string;
   branchCode: string;
+  financeType: string;
   allowedDomains: string[];
-  financeType?: string;
   theme: DealerTheme;
   features: DealerFeatures;
 }
@@ -363,14 +359,17 @@ export interface DealerFeatures {
 export interface DealerConfig {
   key: string;
   name: string;
+  branchCode: string;
+  financeType: string;
   theme: DealerTheme;
   features: DealerFeatures;
-  financeType?: string;
 }
 
 const DEFAULT_CONFIG: DealerConfig = {
   key: "default",
   name: "Vehicle Finance",
+  branchCode: "",
+  financeType: "vehicle",
   theme: {},
   features: { showDeposit: true, showCurrentFinance: true, vehicleQueryParams: true },
 };
@@ -382,11 +381,9 @@ export function DealerProvider({ children }: { children: ReactNode }) {
   const [config, setConfig] = useState<DealerConfig>(DEFAULT_CONFIG);
 
   useEffect(() => {
-    // Read config from dealerConfig.ts — no API call needed
     const dealerConfig = getDealerConfig(dealer);
     setConfig(dealerConfig);
 
-    // Apply theme CSS vars to document root
     const t = dealerConfig.theme || {};
     const root = document.documentElement;
     if (t.primary)      root.style.setProperty("--dealer-primary", t.primary);
