@@ -22,6 +22,7 @@ const {
   key, name, branch, domains,
   primary, label, tagline,
   financeType, seritiKey, seritiSecret,
+  contactEmail,
 } = payload;
 
 const showDeposit = true, showFinance = true, showParams = true;
@@ -86,6 +87,7 @@ async function main() {
     branchCode: '${branch}',
     financeType: '${financeType || "vehicle"}',
     edithEnv: 'prod',
+    contactEmail: '${contactEmail || ""}',
     allowedDomains: [
       ${domainsStr},
       '${key}.seritifinance.findndrive.co.za',
@@ -164,7 +166,7 @@ async function main() {
   // 9. Store Seriti credentials in Cloudflare KV
   console.log('🔐 Storing Seriti credentials in KV...');
   if (seritiKey && seritiSecret) {
-    const kvNamespaceId = '16c7bf807bc0445ab0420a16f2352c0d'; // SERITI_CACHE KV namespace
+    const kvNamespaceId = '16c7bf807bc0445ab0420a16f2352c0d';
     const cfBase = `https://api.cloudflare.com/client/v4/accounts/${cfAccountId}/storage/kv/namespaces/${kvNamespaceId}/values`;
     await fetch(`${cfBase}/SERITI_KEY_${key}`, {
       method: 'PUT',
