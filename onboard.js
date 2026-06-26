@@ -20,8 +20,7 @@ const payload     = JSON.parse(process.env.DEALER_PAYLOAD);
 
 const {
   key, name, branch, domains,
-  primary, label, tagline,
-  financeType, seritiKey, seritiSecret,
+  primary, financeType, seritiKey, seritiSecret,
   contactEmail,
 } = payload;
 
@@ -153,17 +152,22 @@ async function main() {
   const envContent = `VITE_WORKER_URL=https://seritifinance.findndrive.co.za\nVITE_DEFAULT_DEALER=${key}\n`;
   await commitFile(repoName, '.env', envContent, `chore: set env vars for ${key}`, envSha);
 
-  // 7. Commit GitHub Actions workflow
+  // 7. Commit route index.tsx with dealer SEO
+  console.log('🔍 Committing SEO route...');
+  const routeSha = await getFileSha(repoName, 'src/routes/index.tsx');
+  await commitFile(repoName, 'src/routes/index.tsx', buildRouteIndex(), `seo: add dealer meta tags for ${key}`, routeSha);
+
+  // 8. Commit GitHub Actions workflow
   console.log('⚙️  Committing deploy workflow...');
   const workflowSha = await getFileSha(repoName, '.github/workflows/deploy.yml');
   await commitFile(repoName, '.github/workflows/deploy.yml', buildWorkflow(), `ci: add Cloudflare Workers deploy workflow`, workflowSha);
 
-  // 8. Set GitHub secrets
+  // 9. Set GitHub secrets
   console.log('🔐 Setting GitHub secrets...');
   await setSecret(repoName, 'CLOUDFLARE_API_TOKEN', cfToken);
   await setSecret(repoName, 'CLOUDFLARE_ACCOUNT_ID', cfAccountId);
 
-  // 9. Store Seriti credentials in Cloudflare KV
+  // 10. Store Seriti credentials in Cloudflare KV
   console.log('🔐 Storing Seriti credentials in KV...');
   if (seritiKey && seritiSecret) {
     const kvNamespaceId = '16c7bf807bc0445ab0420a16f2352c0d';
@@ -181,7 +185,7 @@ async function main() {
     console.log('✅ Seriti credentials stored in KV');
   }
 
-  // 10. Trigger first deployment
+  // 11. Trigger first deployment
   console.log('🚀 Triggering first deployment...');
   await sleep(2000);
   try {
@@ -198,7 +202,7 @@ async function main() {
   console.log('⏳ Waiting for deployment to complete before binding custom domain...');
   await sleep(90000);
 
-  // 11. Add Cloudflare Custom Domain
+  // 12. Add Cloudflare Custom Domain
   console.log('🌐 Adding Cloudflare Custom Domain...');
   try {
     const zoneRes = await fetch(
@@ -234,6 +238,69 @@ async function main() {
 
   console.log(`\n✅ Dealer ${name} onboarded successfully!\n`);
   console.log(`Repo: https://github.com/${GH_ORG}/${repoName}`);
+}
+
+function buildRouteIndex() {
+  const isBike = financeType === 'bike';
+  const assetType = isBike ? 'bike' : 'vehicle';
+  const canonicalUrl = `https://${key}.seritifinance.findndrive.co.za`;
+  const title = `${name} — ${isBike ? 'Bike' : 'Vehicle'} Finance`;
+  const description = `Check your ${assetType} finance affordability with ${name} in 60 seconds. No credit impact. Get an instant estimate powered by FindAndDrive.`;
+
+  const jsonLd = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "FinancialProduct",
+    "name": `${name} ${isBike ? 'Bike' : 'Vehicle'} Finance`,
+    "description": description,
+    "url": canonicalUrl,
+    "provider": {
+      "@type": "Organization",
+      "name": name,
+      "url": domains[0] ? `https://${domains[0]}` : canonicalUrl,
+    },
+    "feesAndCommissionsSpecification": "No application fee. No credit impact.",
+    "areaServed": {
+      "@type": "Country",
+      "name": "South Africa",
+    },
+  });
+
+  return `import { createFileRoute } from "@tanstack/react-router";
+import { Wizard } from "@/components/wizard/Wizard";
+
+export const Route = createFileRoute("/")({
+  head: () => ({
+    meta: [
+      { title: "${title}" },
+      { name: "description", content: "${description}" },
+      { name: "robots", content: "index, follow" },
+      { property: "og:type", content: "website" },
+      { property: "og:url", content: "${canonicalUrl}" },
+      { property: "og:title", content: "${title}" },
+      { property: "og:description", content: "${description}" },
+      { property: "og:site_name", content: "${name}" },
+      { name: "twitter:card", content: "summary" },
+      { name: "twitter:title", content: "${title}" },
+      { name: "twitter:description", content: "${description}" },
+      { name: "theme-color", content: "${primary}" },
+    ],
+    links: [
+      { rel: "canonical", href: "${canonicalUrl}" },
+    ],
+    scripts: [
+      {
+        type: "application/ld+json",
+        children: \`${jsonLd}\`,
+      },
+    ],
+  }),
+  component: Index,
+});
+
+function Index() {
+  return <Wizard />;
+}
+`;
 }
 
 function buildDealerConfig() {
