@@ -21,7 +21,7 @@ const payload     = JSON.parse(process.env.DEALER_PAYLOAD);
 const {
   key, name, branch, domains,
   primary, financeType, seritiKey, seritiSecret,
-  contactEmail,
+  contactEmail, billingType,
 } = payload;
 
 const showDeposit = true, showFinance = true, showParams = true;
@@ -87,6 +87,7 @@ async function main() {
     financeType: '${financeType || "vehicle"}',
     edithEnv: 'prod',
     contactEmail: '${contactEmail || ""}',
+    billingType: '${billingType || "transaction"}',
     allowedDomains: [
       ${domainsStr},
       '${key}.seritifinance.findndrive.co.za',
@@ -105,7 +106,6 @@ async function main() {
     },
   },
 `;
-    // Insert new entry before the ADD MORE DEALERS comment block inside the DEALERS object
     const updatedContent = currentContent.replace(
       /(  \/\/ ─+\n  \/\/ ADD MORE DEALERS BELOW[^\n]*\n  \/\/ ─+\n};)/,
       newEntry + '$1'
