@@ -19,8 +19,9 @@ const cfAccountId = process.env.CF_ACCOUNT_ID;
 const payload     = JSON.parse(process.env.DEALER_PAYLOAD);
 
 const {
-  key, name, branch, domains,
-  primary, financeType, seritiKey, seritiSecret,
+  key, name, branch, branches,
+  setupType, domains, primary,
+  financeType, seritiKey, seritiSecret,
   contactEmail, billingType,
 } = payload;
 
@@ -68,6 +69,8 @@ async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function main() {
   console.log(`\n🚀 Onboarding dealer: ${name} (${key})\n`);
+  console.log(`📋 Setup type: ${setupType}`);
+  if (branches) console.log(`🔀 Branches: ${branches.map(b => `${b.name} (${b.code})`).join(', ')}`);
 
   // 1. Update backend dealers.config.js
   console.log('📝 Updating backend config...');
@@ -80,6 +83,12 @@ async function main() {
     console.log(`ℹ️  Dealer entry '${key}' already exists in dealers.config.js — skipping backend config update`);
   } else {
     const domainsStr = domains.map(d => `'${d}'`).join(',\n      ');
+
+    // Build branches string if multi-branch setup
+    const branchesStr = branches && branches.length > 0
+      ? `    branches: [\n${branches.map(b => `      { code: '${b.code}', name: '${b.name}' },`).join('\n')}\n    ],`
+      : '';
+
     const newEntry = `
   '${key}': {
     name: '${name}',
@@ -87,7 +96,7 @@ async function main() {
     financeType: '${financeType || "vehicle"}',
     edithEnv: 'prod',
     contactEmail: '${contactEmail || ""}',
-    billingType: '${billingType || "transaction"}',
+    billingType: '${billingType || "transaction"}',${branchesStr ? '\n' + branchesStr : ''}
     allowedDomains: [
       ${domainsStr},
       '${key}.seritifinance.findndrive.co.za',
@@ -106,6 +115,7 @@ async function main() {
     },
   },
 `;
+
     const updatedContent = currentContent.replace(
       /(  \/\/ ─+\n  \/\/ ADD MORE DEALERS BELOW[^\n]*\n  \/\/ ─+\n};)/,
       newEntry + '$1'
@@ -247,6 +257,13 @@ async function main() {
 
   console.log(`\n✅ Dealer ${name} onboarded successfully!\n`);
   console.log(`Repo: https://github.com/${GH_ORG}/${repoName}`);
+  if (setupType === 'multi-branch') {
+    console.log(`🔀 Multi-branch setup — ${branches.length} branches configured`);
+    console.log(`   Branch selector will be shown to users on the application form`);
+  }
+  if (setupType === 'multi-site') {
+    console.log(`ℹ️  Multi-site setup — run onboarding again for each additional branch`);
+  }
 }
 
 function buildRouteIndex() {
@@ -329,6 +346,11 @@ export interface DealerFeatures {
   vehicleQueryParams: boolean;
 }
 
+export interface DealerBranch {
+  code: string;
+  name: string;
+}
+
 export interface DealerEntry {
   name: string;
   branchCode: string;
@@ -336,6 +358,7 @@ export interface DealerEntry {
   allowedDomains: string[];
   theme: DealerTheme;
   features: DealerFeatures;
+  branches?: DealerBranch[];
 }
 
 export interface DealerConfig {
@@ -346,6 +369,7 @@ export interface DealerConfig {
   allowedDomains: string[];
   theme: DealerTheme;
   features: DealerFeatures;
+  branches?: DealerBranch[];
 }
 
 export const DEALERS: Record<string, DealerEntry> = {
@@ -353,7 +377,9 @@ export const DEALERS: Record<string, DealerEntry> = {
     name: '${name}',
     branchCode: '${branch}',
     financeType: '${financeType || "vehicle"}',
-    allowedDomains: [${domains.map(d => `'${d}'`).join(', ')}, '${key}.seritifinance.findndrive.co.za'],
+    allowedDomains: [${domains.map(d => `'${d}'`).join(', ')}, '${key}.seritifinance.findndrive.co.za'],${branches && branches.length > 0 ? `
+    branches: [${branches.map(b => `\n      { code: '${b.code}', name: '${b.name}' },`).join('')}
+    ],` : ''}
     theme: {
       primary: '${primary}',
       gradient: 'linear-gradient(135deg, ${primary} 0%, ${primary} 100%)',
@@ -434,6 +460,11 @@ export interface DealerFeatures {
   vehicleQueryParams: boolean;
 }
 
+export interface DealerBranch {
+  code: string;
+  name: string;
+}
+
 export interface DealerConfig {
   key: string;
   name: string;
@@ -441,6 +472,7 @@ export interface DealerConfig {
   financeType: string;
   theme: DealerTheme;
   features: DealerFeatures;
+  branches?: DealerBranch[];
 }
 
 const DEFAULT_CONFIG: DealerConfig = {
