@@ -105,7 +105,16 @@ async function main() {
     },
   },
 `;
-    const updatedContent = currentContent.replace(/(\/\/ ── Lookup helpers)/, newEntry + '$1');
+    // Insert new entry before the ADD MORE DEALERS comment block inside the DEALERS object
+    const updatedContent = currentContent.replace(
+      /(  \/\/ ─+\n  \/\/ ADD MORE DEALERS BELOW[^\n]*\n  \/\/ ─+\n};)/,
+      newEntry + '$1'
+    );
+
+    if (updatedContent === currentContent) {
+      throw new Error('Could not find insertion point in dealers.config.js — check the ADD MORE DEALERS comment block is present');
+    }
+
     await commitFile(BACKEND_REPO, BACKEND_FILE, updatedContent, `feat: add dealer ${key}`, fileData.sha);
   }
 
