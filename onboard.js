@@ -16,6 +16,8 @@ const BACKEND_FILE  = 'workers/dealers/dealers.config.js';
 const ghToken     = process.env.GH_PAT;
 const cfToken     = process.env.CF_API_TOKEN;
 const cfAccountId = process.env.CF_ACCOUNT_ID;
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const payload     = JSON.parse(process.env.DEALER_PAYLOAD);
 
 const {
@@ -25,6 +27,7 @@ const {
   contactEmail, billingType,
 } = payload;
 
+const SITE_URL = 'https://analytics.findndrive.co.za';
 const showDeposit = true, showFinance = true, showParams = true;
 
 const octokit = new Octokit({ auth: ghToken });
@@ -67,6 +70,94 @@ async function commitFile(repo, path, content, message, sha) {
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// ── Supabase Analytics Invite ─────────────────────────────────────────────────
+
+async function inviteDealerToAnalytics() {
+  if (!supabaseUrl || !supabaseServiceKey) {
+    console.log('⚠️  SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — skipping analytics invite');
+    return;
+  }
+
+  if (!contactEmail) {
+    console.log('⚠️  No contactEmail in payload — skipping analytics invite');
+    return;
+  }
+
+  console.log(`📧 Inviting ${contactEmail} to E-fficient Analytics...`);
+
+  try {
+    // Step 1: Send invite email (Supabase handles the email)
+    const inviteRes = await fetch(`${supabaseUrl}/auth/v1/admin/invite`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${supabaseServiceKey}`,
+        'apikey': supabaseServiceKey,
+      },
+      body: JSON.stringify({
+        email: contactEmail,
+        options: {
+          redirectTo: `${SITE_URL}/auth/reset-password`,
+          data: {
+            dealer_id: key,
+            dealer_name: name,
+            finance_type: financeType || 'vehicle',
+          },
+        },
+      }),
+    });
+
+    const inviteData = await inviteRes.json();
+
+    if (!inviteRes.ok) {
+      const msg = inviteData.message || inviteData.msg || `HTTP ${inviteRes.status}`;
+      // If already registered, just update their metadata
+      if (msg.toLowerCase().includes('already registered')) {
+        console.log(`ℹ️  ${contactEmail} already has an account — updating metadata only`);
+      } else {
+        throw new Error(msg);
+      }
+    }
+
+    const userId = inviteData.id;
+
+    // Step 2: Set app_metadata so dealer_id is in the JWT
+    if (userId) {
+      const metaRes = await fetch(`${supabaseUrl}/auth/v1/admin/users/${userId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${supabaseServiceKey}`,
+          'apikey': supabaseServiceKey,
+        },
+        body: JSON.stringify({
+          app_metadata: {
+            dealer_id: key,
+            dealer_name: name,
+            finance_type: financeType || 'vehicle',
+          },
+        }),
+      });
+
+      if (!metaRes.ok) {
+        const metaData = await metaRes.json();
+        console.log(`⚠️  Could not set metadata: ${metaData.message || metaData.msg}`);
+      } else {
+        console.log(`✅ Metadata set for ${contactEmail} (dealer_id: ${key})`);
+      }
+    }
+
+    console.log(`✅ Analytics invite sent to ${contactEmail}`);
+    console.log(`   They will receive an email to set their password`);
+    console.log(`   Dashboard: ${SITE_URL}`);
+
+  } catch (err) {
+    // Non-fatal — don't fail the whole onboarding if analytics invite fails
+    console.log(`⚠️  Analytics invite failed: ${err.message}`);
+    console.log(`   You can manually invite them later from the admin dashboard`);
+  }
+}
+
 async function main() {
   console.log(`\n🚀 Onboarding dealer: ${name} (${key})\n`);
   console.log(`📋 Setup type: ${setupType}`);
@@ -84,7 +175,6 @@ async function main() {
   } else {
     const domainsStr = domains.map(d => `'${d}'`).join(',\n      ');
 
-    // Build branches string if multi-branch setup
     const branchesStr = branches && branches.length > 0
       ? `    branches: [\n${branches.map(b => `      { code: '${b.code}', name: '${b.name}' },`).join('\n')}\n    ],`
       : '';
@@ -255,8 +345,13 @@ async function main() {
     console.log('⚠️  Could not add custom domain automatically:', e.message);
   }
 
+  // 13. Invite dealer to E-fficient Analytics dashboard
+  console.log('📊 Inviting dealer to analytics dashboard...');
+  await inviteDealerToAnalytics();
+
   console.log(`\n✅ Dealer ${name} onboarded successfully!\n`);
   console.log(`Repo: https://github.com/${GH_ORG}/${repoName}`);
+  console.log(`Analytics: ${SITE_URL}`);
   if (setupType === 'multi-branch') {
     console.log(`🔀 Multi-branch setup — ${branches.length} branches configured`);
     console.log(`   Branch selector will be shown to users on the application form`);
