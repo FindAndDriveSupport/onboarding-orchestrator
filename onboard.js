@@ -25,10 +25,12 @@ const {
   setupType, domains, primary,
   financeType, seritiKey, seritiSecret,
   contactEmail, billingType,
+  showVehicleSelection,
 } = payload;
 
 const SITE_URL = 'https://analytics.findndrive.co.za';
 const showDeposit = true, showFinance = true, showParams = true;
+const vehicleSelectionEnabled = !!showVehicleSelection;
 
 const octokit = new Octokit({ auth: ghToken });
 
@@ -162,6 +164,7 @@ async function main() {
   console.log(`\n🚀 Onboarding dealer: ${name} (${key})\n`);
   console.log(`📋 Setup type: ${setupType}`);
   if (branches) console.log(`🔀 Branches: ${branches.map(b => `${b.name} (${b.code})`).join(', ')}`);
+  if (vehicleSelectionEnabled) console.log(`🚗 Vehicle selection page: enabled`);
 
   // 1. Update backend dealers.config.js
   console.log('📝 Updating backend config...');
@@ -201,7 +204,7 @@ async function main() {
     features: {
       showDeposit: ${showDeposit},
       showCurrentFinance: ${showFinance},
-      vehicleQueryParams: ${showParams},
+      vehicleQueryParams: ${showParams},${vehicleSelectionEnabled ? '\n      showVehicleSelection: true,' : ''}
     },
   },
 `;
@@ -352,6 +355,7 @@ async function main() {
   console.log(`\n✅ Dealer ${name} onboarded successfully!\n`);
   console.log(`Repo: https://github.com/${GH_ORG}/${repoName}`);
   console.log(`Analytics: ${SITE_URL}`);
+  if (vehicleSelectionEnabled) console.log(`🚗 Vehicle selection page enabled for this dealer`);
   if (setupType === 'multi-branch') {
     console.log(`🔀 Multi-branch setup — ${branches.length} branches configured`);
     console.log(`   Branch selector will be shown to users on the application form`);
@@ -439,6 +443,7 @@ export interface DealerFeatures {
   showDeposit: boolean;
   showCurrentFinance: boolean;
   vehicleQueryParams: boolean;
+  showVehicleSelection?: boolean;
 }
 
 export interface DealerBranch {
@@ -484,7 +489,7 @@ export const DEALERS: Record<string, DealerEntry> = {
     features: {
       showDeposit: ${showDeposit},
       showCurrentFinance: ${showFinance},
-      vehicleQueryParams: ${showParams},
+      vehicleQueryParams: ${showParams},${vehicleSelectionEnabled ? '\n      showVehicleSelection: true,' : ''}
     },
   },
 };
@@ -553,6 +558,7 @@ export interface DealerFeatures {
   showDeposit: boolean;
   showCurrentFinance: boolean;
   vehicleQueryParams: boolean;
+  showVehicleSelection?: boolean;
 }
 
 export interface DealerBranch {
