@@ -15,7 +15,7 @@ const BACKEND_FILE  = 'workers/dealers/dealers.config.js';
 
 // KV namespace that backs the leads-api Worker's dealer config (LEADS_SYNC_CONFIG binding).
 // Find it with: npx wrangler kv namespace list  (look for the leads-api project's LEADS_SYNC_CONFIG id)
-const LEADS_SYNC_CONFIG_KV_ID = '<FILL_IN_LEADS_SYNC_CONFIG_NAMESPACE_ID>';
+const LEADS_SYNC_CONFIG_KV_ID = '352dc4a8e9244b88b315a12590fd6a1a';
 
 const ghToken     = process.env.GH_PAT;
 const cfToken     = process.env.CF_API_TOKEN;
