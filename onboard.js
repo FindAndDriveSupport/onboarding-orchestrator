@@ -15,7 +15,7 @@ const BACKEND_FILE  = 'workers/dealers/dealers.config.js';
 
 // KV namespace that backs the leads-api Worker's dealer config (LEADS_SYNC_CONFIG binding).
 // Find it with: npx wrangler kv namespace list  (look for the leads-api project's LEADS_SYNC_CONFIG id)
-const LEADS_SYNC_CONFIG_KV_ID = '352dc4a8e9244b88b315a12590fd6a1a';
+const LEADS_SYNC_CONFIG_KV_ID = '<FILL_IN_LEADS_SYNC_CONFIG_NAMESPACE_ID>';
 
 const ghToken     = process.env.GH_PAT;
 const cfToken     = process.env.CF_API_TOKEN;
@@ -30,6 +30,9 @@ const {
   financeType, seritiKey, seritiSecret, seritiDealershipId,
   contactEmail, billingType,
   showVehicleSelection,
+  // NEW — links this dealer to a parent group (e.g. multiple sites under one owner).
+  // Optional. Leave blank/undefined for standalone dealers.
+  groupKey,
   // NEW — populated by the UI's "Send leads to" selector.
   // e.g. [{ type: "hubspot", hubspotToken }, { type: "vmg", vmgUsername, vmgPassword, dealerId }, ...]
   leadDestinations,
@@ -124,6 +127,7 @@ async function configureLeadSync() {
 
   const leadsSyncConfig = {
     key,
+    groupKey: groupKey || '',
     seritiApiKey: seritiKey,
     seritiApiSecret: seritiSecret,
     seritiDealershipId,
@@ -247,6 +251,7 @@ async function main() {
   if (leadDestinations && leadDestinations.length) {
     console.log(`📬 Lead destinations: ${leadDestinations.map(d => d.type).join(', ')}`);
   }
+  if (groupKey) console.log(`🏢 Dealer group: ${groupKey}`);
 
   // 1. Update backend dealers.config.js
   console.log('📝 Updating backend config...');
@@ -271,7 +276,8 @@ async function main() {
     financeType: '${financeType || "vehicle"}',
     edithEnv: 'prod',
     contactEmail: '${contactEmail || ""}',
-    billingType: '${billingType || "transaction"}',${branchesStr ? '\n' + branchesStr : ''}
+    billingType: '${billingType || "transaction"}',
+    groupKey: '${groupKey || ""}',${branchesStr ? '\n' + branchesStr : ''}
     allowedDomains: [
       ${domainsStr},
       '${key}.seritifinance.findndrive.co.za',
