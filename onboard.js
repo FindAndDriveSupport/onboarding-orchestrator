@@ -13,6 +13,10 @@ const TEMPLATE_REPO = 'e-fficient-ui';
 const BACKEND_REPO  = 'efficient-finance-widget';
 const BACKEND_FILE  = 'workers/dealers/dealers.config.js';
 
+// KV namespace that backs the leads-api Worker's dealer config (LEADS_SYNC_CONFIG binding).
+// Find it with: npx wrangler kv namespace list  (look for the leads-api project's LEADS_SYNC_CONFIG id)
+const LEADS_SYNC_CONFIG_KV_ID = '<FILL_IN_LEADS_SYNC_CONFIG_NAMESPACE_ID>';
+
 const ghToken     = process.env.GH_PAT;
 const cfToken     = process.env.CF_API_TOKEN;
 const cfAccountId = process.env.CF_ACCOUNT_ID;
@@ -23,9 +27,14 @@ const payload     = JSON.parse(process.env.DEALER_PAYLOAD);
 const {
   key, name, branch, branches,
   setupType, domains, primary,
-  financeType, seritiKey, seritiSecret,
+  financeType, seritiKey, seritiSecret, seritiDealershipId,
   contactEmail, billingType,
   showVehicleSelection,
+  // NEW — populated by the UI's "Send leads to" selector.
+  // e.g. [{ type: "hubspot", hubspotToken }, { type: "vmg", vmgUsername, vmgPassword, dealerId }, ...]
+  leadDestinations,
+  // NEW — optional, only relevant if the UI exposes a Kredo toggle for this dealer.
+  kredoEnabled, kredoUsername, kredoPassword, kredoXApiKey,
 } = payload;
 
 const SITE_URL = 'https://analytics.findndrive.co.za';
@@ -71,6 +80,76 @@ async function commitFile(repo, path, content, message, sha) {
 }
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ── Lead Sync Destination Config ──────────────────────────────────────────────
+
+const REQUIRED_DEST_FIELDS = {
+  hubspot: ['hubspotToken'],
+  vmg:     ['vmgUsername', 'vmgPassword', 'dealerId'],
+  cms:     ['cmsToken', 'dealerRef', 'dealerFloor'],
+};
+
+function validateDestinations(destinations) {
+  for (const dest of destinations) {
+    const required = REQUIRED_DEST_FIELDS[dest.type];
+    if (!required) {
+      console.log(`⚠️  Unknown destination type '${dest.type}' — leads-api-worker will reject this at runtime`);
+      continue;
+    }
+    const missing = required.filter(f => !dest[f]);
+    if (missing.length) {
+      console.log(`⚠️  Destination '${dest.type}' is missing: ${missing.join(', ')} — fix this in KV before leads flow`);
+    }
+  }
+}
+
+async function configureLeadSync() {
+  if (!leadDestinations || leadDestinations.length === 0) {
+    console.log('ℹ️  No lead destinations selected — skipping lead-sync config');
+    return;
+  }
+
+  if (!seritiKey || !seritiSecret || !seritiDealershipId) {
+    console.log('⚠️  Missing Seriti key/secret/dealershipId in payload — cannot configure lead sync, skipping');
+    return;
+  }
+
+  if (LEADS_SYNC_CONFIG_KV_ID.startsWith('<FILL_IN')) {
+    console.log('⚠️  LEADS_SYNC_CONFIG_KV_ID is not set in onboard.js — skipping lead-sync config');
+    return;
+  }
+
+  console.log(`🔀 Configuring lead sync → ${leadDestinations.map(d => d.type).join(', ')}`);
+  validateDestinations(leadDestinations);
+
+  const leadsSyncConfig = {
+    key,
+    seritiApiKey: seritiKey,
+    seritiApiSecret: seritiSecret,
+    seritiDealershipId,
+    startDate: new Date().toISOString().slice(0, 10),
+    kredoEnabled: !!kredoEnabled,
+    kredoUsername: kredoUsername || '',
+    kredoPassword: kredoPassword || '',
+    kredoXApiKey: kredoXApiKey || '',
+    destinations: leadDestinations,
+  };
+
+  try {
+    const url = `https://api.cloudflare.com/client/v4/accounts/${cfAccountId}/storage/kv/namespaces/${LEADS_SYNC_CONFIG_KV_ID}/values/${key}`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${cfToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(leadsSyncConfig),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(JSON.stringify(data.errors || data));
+    console.log(`✅ Lead sync config written for ${key} (${leadDestinations.length} destination(s))`);
+  } catch (err) {
+    console.log(`⚠️  Lead sync config write failed: ${err.message}`);
+    console.log(`   Set it manually: npx wrangler kv key put --binding=LEADS_SYNC_CONFIG "${key}" '<config json>'`);
+  }
+}
 
 // ── Supabase Analytics Invite ─────────────────────────────────────────────────
 
@@ -165,6 +244,9 @@ async function main() {
   console.log(`📋 Setup type: ${setupType}`);
   if (branches) console.log(`🔀 Branches: ${branches.map(b => `${b.name} (${b.code})`).join(', ')}`);
   if (vehicleSelectionEnabled) console.log(`🚗 Vehicle selection page: enabled`);
+  if (leadDestinations && leadDestinations.length) {
+    console.log(`📬 Lead destinations: ${leadDestinations.map(d => d.type).join(', ')}`);
+  }
 
   // 1. Update backend dealers.config.js
   console.log('📝 Updating backend config...');
@@ -352,10 +434,17 @@ async function main() {
   console.log('📊 Inviting dealer to analytics dashboard...');
   await inviteDealerToAnalytics();
 
+  // 14. Configure lead sync destinations (HubSpot / CMS / VMG — chosen in the UI)
+  console.log('🔀 Configuring lead sync destinations...');
+  await configureLeadSync();
+
   console.log(`\n✅ Dealer ${name} onboarded successfully!\n`);
   console.log(`Repo: https://github.com/${GH_ORG}/${repoName}`);
   console.log(`Analytics: ${SITE_URL}`);
   if (vehicleSelectionEnabled) console.log(`🚗 Vehicle selection page enabled for this dealer`);
+  if (leadDestinations && leadDestinations.length) {
+    console.log(`📬 Leads will sync to: ${leadDestinations.map(d => d.type).join(', ')}`);
+  }
   if (setupType === 'multi-branch') {
     console.log(`🔀 Multi-branch setup — ${branches.length} branches configured`);
     console.log(`   Branch selector will be shown to users on the application form`);
