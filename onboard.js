@@ -88,8 +88,8 @@ async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 const REQUIRED_DEST_FIELDS = {
   hubspot: ['hubspotToken'],
-  vmg:     ['vmgUsername', 'vmgPassword', 'dealerId'],
-  cms:     ['cmsToken', 'dealerRef', 'dealerFloor'],
+  vmg:     ['dealerId'],       // vmgUsername/vmgPassword optional — falls back to shared credentials in LEADS_SYNC_CONFIG
+  cms:     ['dealerRef', 'dealerFloor'], // cmsToken optional — falls back to shared credentials in LEADS_SYNC_CONFIG
 };
 
 function validateDestinations(destinations) {
