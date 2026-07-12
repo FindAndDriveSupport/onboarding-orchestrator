@@ -139,37 +139,43 @@ async function syncAnalyticsAccess() {
     }
 
     // 2. Insert dealer row(s)
-    const websiteFlag = hasWebsite ? 1 : 0;
+    const websiteFlag  = hasWebsite ? 1 : 0;
+    // Comma-separated list — tracked Mixpanel URLs reflect the dealer's own
+    // domain(s) (custom domain + seritifinance.findndrive.co.za subdomain),
+    // not a Seriti branch code, so this is what engagement filtering matches on.
+    const domainList   = [...(domains || []), `${key}.seritifinance.findndrive.co.za`].join(',');
 
     if (branches && branches.length > 0) {
       for (const b of branches) {
         const branchDealerId = `${key}__${b.code}`;
         await d1Query(
-          `INSERT INTO dealers (id, name, group_id, finance_type, has_website, branch_code)
-           VALUES (?, ?, ?, ?, ?, ?)
+          `INSERT INTO dealers (id, name, group_id, finance_type, has_website, branch_code, domain)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              name = excluded.name,
              group_id = excluded.group_id,
              finance_type = excluded.finance_type,
              has_website = excluded.has_website,
-             branch_code = excluded.branch_code`,
-          [branchDealerId, b.name, groupKey || null, financeType || 'vehicle', websiteFlag, b.code]
+             branch_code = excluded.branch_code,
+             domain = excluded.domain`,
+          [branchDealerId, b.name, groupKey || null, financeType || 'vehicle', websiteFlag, b.code, domainList]
         );
-        console.log(`✅ Dealer branch synced: ${branchDealerId} (${b.name}, branch_code=${b.code})`);
+        console.log(`✅ Dealer branch synced: ${branchDealerId} (${b.name}, branch_code=${b.code}, domain=${domainList})`);
       }
     } else {
       await d1Query(
-        `INSERT INTO dealers (id, name, group_id, finance_type, has_website, branch_code)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO dealers (id, name, group_id, finance_type, has_website, branch_code, domain)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            group_id = excluded.group_id,
            finance_type = excluded.finance_type,
            has_website = excluded.has_website,
-           branch_code = excluded.branch_code`,
-        [key, name, groupKey || null, financeType || 'vehicle', websiteFlag, branch]
+           branch_code = excluded.branch_code,
+           domain = excluded.domain`,
+        [key, name, groupKey || null, financeType || 'vehicle', websiteFlag, branch, domainList]
       );
-      console.log(`✅ Dealer synced: ${key} (${name}, branch_code=${branch})`);
+      console.log(`✅ Dealer synced: ${key} (${name}, branch_code=${branch}, domain=${domainList})`);
     }
   } catch (err) {
     console.log(`⚠️  Analytics D1 sync failed: ${err.message}`);
