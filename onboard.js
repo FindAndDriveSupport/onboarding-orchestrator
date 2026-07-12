@@ -143,7 +143,13 @@ async function syncAnalyticsAccess() {
     // Comma-separated list — tracked Mixpanel URLs reflect the dealer's own
     // domain(s) (custom domain + seritifinance.findndrive.co.za subdomain),
     // not a Seriti branch code, so this is what engagement filtering matches on.
-    const domainList   = [...(domains || []), `${key}.seritifinance.findndrive.co.za`].join(',');
+    // Include both www and non-www variants since we can't know upfront
+    // which the dealer's site actually redirects to/tracks with.
+    const domainVariants = (domains || []).flatMap(d => {
+      const bare = d.replace(/^www\./, '');
+      return [bare, `www.${bare}`];
+    });
+    const domainList = [...domainVariants, `${key}.seritifinance.findndrive.co.za`].join(',');
 
     if (branches && branches.length > 0) {
       for (const b of branches) {
