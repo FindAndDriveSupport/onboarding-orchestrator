@@ -13,8 +13,10 @@ const TEMPLATE_REPO = 'e-fficient-ui';
 const BACKEND_REPO  = 'efficient-finance-widget';
 const BACKEND_FILE  = 'workers/dealers/dealers.config.js';
 
+// D1 database that backs the analytics dashboard (postal-codes-db).
+const ANALYTICS_D1_DATABASE_ID = 'a518623c-f74b-4889-98da-d9ddda0ff632';
+
 // KV namespace that backs the leads-api Worker's dealer config (LEADS_SYNC_CONFIG binding).
-// Find it with: npx wrangler kv namespace list  (look for the leads-api project's LEADS_SYNC_CONFIG id)
 const LEADS_SYNC_CONFIG_KV_ID = '<FILL_IN_LEADS_SYNC_CONFIG_NAMESPACE_ID>';
 
 const ghToken     = process.env.GH_PAT;
@@ -30,13 +32,10 @@ const {
   financeType, seritiKey, seritiSecret, seritiDealershipId,
   contactEmail, billingType,
   showVehicleSelection,
-  // NEW — links this dealer to a parent group (e.g. multiple sites under one owner).
-  // Optional. Leave blank/undefined for standalone dealers.
   groupKey,
-  // NEW — populated by the UI's "Send leads to" selector.
-  // e.g. [{ type: "hubspot", hubspotToken }, { type: "vmg", vmgUsername, vmgPassword, dealerId }, ...]
+  groupName,          // NEW — display name for the group, defaults to groupKey if absent
+  hasWebsite,         // NEW — explicit boolean from onboarding UI; controls the Stock nav item in analytics
   leadDestinations,
-  // NEW — optional, only relevant if the UI exposes a Kredo toggle for this dealer.
   kredoEnabled, kredoUsername, kredoPassword, kredoXApiKey,
 } = payload;
 
@@ -84,12 +83,104 @@ async function commitFile(repo, path, content, message, sha) {
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// ── D1 sync (analytics access control) ────────────────────────────────────────
+
+/**
+ * Runs a SQL statement against the analytics D1 database via the REST API.
+ * onboard.js runs in GitHub Actions, outside the Worker, so it can't use
+ * the D1 binding directly — the HTTP query API is the equivalent.
+ */
+async function d1Query(sql, params = []) {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${cfAccountId}/d1/database/${ANALYTICS_D1_DATABASE_ID}/query`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${cfToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ sql, params }),
+  });
+  const data = await res.json();
+  if (!data.success) {
+    throw new Error(`D1 query failed: ${JSON.stringify(data.errors || data)}`);
+  }
+  return data.result;
+}
+
+/**
+ * Syncs this dealer (and its branches, if any) into the analytics D1 database
+ * so they appear correctly in the dealer access model — without any manual
+ * admin-side data entry.
+ *
+ * NOTE: For multi-branch dealers, each branch gets its own `dealers` row
+ * (id = "{key}__{branchCode}") sharing one `group_id`. This lets branch users
+ * log in and see only their branch, and group admins switch between branches.
+ * policy_events still stores one shared `dealer_key` + a separate `branch_code`
+ * column — report.js / mixpanel.js / dealers.js queries don't yet filter by
+ * branch_code, so branch-level policy data isn't split out yet. Flagging this
+ * as a follow-up rather than guessing at the right filtering logic here.
+ */
+async function syncAnalyticsAccess() {
+  if (!cfAccountId || !cfToken) {
+    console.log('⚠️  CF_ACCOUNT_ID or CF_API_TOKEN not set — skipping analytics D1 sync');
+    return;
+  }
+
+  console.log('🗂️  Syncing dealer into analytics access model (D1)...');
+
+  try {
+    // 1. Ensure the group exists, if this dealer belongs to one
+    if (groupKey) {
+      await d1Query(
+        `INSERT OR IGNORE INTO groups (id, name) VALUES (?, ?)`,
+        [groupKey, groupName || groupKey]
+      );
+      console.log(`✅ Group ensured: ${groupKey}`);
+    }
+
+    // 2. Insert dealer row(s)
+    const websiteFlag = hasWebsite ? 1 : 0;
+
+    if (branches && branches.length > 0) {
+      for (const b of branches) {
+        const branchDealerId = `${key}__${b.code}`;
+        await d1Query(
+          `INSERT INTO dealers (id, name, group_id, finance_type, has_website)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             name = excluded.name,
+             group_id = excluded.group_id,
+             finance_type = excluded.finance_type,
+             has_website = excluded.has_website`,
+          [branchDealerId, b.name, groupKey || null, financeType || 'vehicle', websiteFlag]
+        );
+        console.log(`✅ Dealer branch synced: ${branchDealerId} (${b.name})`);
+      }
+    } else {
+      await d1Query(
+        `INSERT INTO dealers (id, name, group_id, finance_type, has_website)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           group_id = excluded.group_id,
+           finance_type = excluded.finance_type,
+           has_website = excluded.has_website`,
+        [key, name, groupKey || null, financeType || 'vehicle', websiteFlag]
+      );
+      console.log(`✅ Dealer synced: ${key} (${name})`);
+    }
+  } catch (err) {
+    console.log(`⚠️  Analytics D1 sync failed: ${err.message}`);
+    console.log(`   You can add this dealer manually via the admin dashboard invite flow`);
+  }
+}
+
 // ── Lead Sync Destination Config ──────────────────────────────────────────────
 
 const REQUIRED_DEST_FIELDS = {
   hubspot: ['hubspotToken'],
-  vmg:     ['dealerId'],       // vmgUsername/vmgPassword optional — falls back to shared credentials in LEADS_SYNC_CONFIG
-  cms:     ['dealerRef', 'dealerFloor'], // cmsToken optional — falls back to shared credentials in LEADS_SYNC_CONFIG
+  vmg:     ['dealerId'],
+  cms:     ['dealerRef', 'dealerFloor'],
 };
 
 function validateDestinations(destinations) {
@@ -156,6 +247,9 @@ async function configureLeadSync() {
 }
 
 // ── Supabase Analytics Invite ─────────────────────────────────────────────────
+// NOTE: this still references Supabase — if you've since migrated auth to the
+// D1/JWT magic-link system, replace this with a call to your invite-dealer.ts
+// script's logic (POST /api/admin/invite on the backend worker) instead.
 
 async function inviteDealerToAnalytics() {
   if (!supabaseUrl || !supabaseServiceKey) {
@@ -171,7 +265,6 @@ async function inviteDealerToAnalytics() {
   console.log(`📧 Inviting ${contactEmail} to E-fficient Analytics...`);
 
   try {
-    // Step 1: Send invite email (Supabase handles the email)
     const inviteRes = await fetch(`${supabaseUrl}/auth/v1/admin/invite`, {
       method: 'POST',
       headers: {
@@ -196,7 +289,6 @@ async function inviteDealerToAnalytics() {
 
     if (!inviteRes.ok) {
       const msg = inviteData.message || inviteData.msg || `HTTP ${inviteRes.status}`;
-      // If already registered, just update their metadata
       if (msg.toLowerCase().includes('already registered')) {
         console.log(`ℹ️  ${contactEmail} already has an account — updating metadata only`);
       } else {
@@ -206,7 +298,6 @@ async function inviteDealerToAnalytics() {
 
     const userId = inviteData.id;
 
-    // Step 2: Set app_metadata so dealer_id is in the JWT
     if (userId) {
       const metaRes = await fetch(`${supabaseUrl}/auth/v1/admin/users/${userId}`, {
         method: 'PUT',
@@ -237,7 +328,6 @@ async function inviteDealerToAnalytics() {
     console.log(`   Dashboard: ${SITE_URL}`);
 
   } catch (err) {
-    // Non-fatal — don't fail the whole onboarding if analytics invite fails
     console.log(`⚠️  Analytics invite failed: ${err.message}`);
     console.log(`   You can manually invite them later from the admin dashboard`);
   }
@@ -252,6 +342,7 @@ async function main() {
     console.log(`📬 Lead destinations: ${leadDestinations.map(d => d.type).join(', ')}`);
   }
   if (groupKey) console.log(`🏢 Dealer group: ${groupKey}`);
+  if (hasWebsite) console.log(`🌐 Dealer website hosting: enabled (Stock nav will show)`);
 
   // 1. Update backend dealers.config.js
   console.log('📝 Updating backend config...');
@@ -440,9 +531,12 @@ async function main() {
   console.log('📊 Inviting dealer to analytics dashboard...');
   await inviteDealerToAnalytics();
 
-  // 14. Configure lead sync destinations (HubSpot / CMS / VMG — chosen in the UI)
+  // 14. Configure lead sync destinations
   console.log('🔀 Configuring lead sync destinations...');
   await configureLeadSync();
+
+  // 15. Sync dealer/group into analytics D1 access model
+  await syncAnalyticsAccess();
 
   console.log(`\n✅ Dealer ${name} onboarded successfully!\n`);
   console.log(`Repo: https://github.com/${GH_ORG}/${repoName}`);
@@ -454,6 +548,7 @@ async function main() {
   if (setupType === 'multi-branch') {
     console.log(`🔀 Multi-branch setup — ${branches.length} branches configured`);
     console.log(`   Branch selector will be shown to users on the application form`);
+    console.log(`   Each branch also has its own analytics dealer row (id = "${key}__<branchCode>")`);
   }
   if (setupType === 'multi-site') {
     console.log(`ℹ️  Multi-site setup — run onboarding again for each additional branch`);
