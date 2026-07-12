@@ -145,29 +145,31 @@ async function syncAnalyticsAccess() {
       for (const b of branches) {
         const branchDealerId = `${key}__${b.code}`;
         await d1Query(
-          `INSERT INTO dealers (id, name, group_id, finance_type, has_website)
-           VALUES (?, ?, ?, ?, ?)
+          `INSERT INTO dealers (id, name, group_id, finance_type, has_website, branch_code)
+           VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              name = excluded.name,
              group_id = excluded.group_id,
              finance_type = excluded.finance_type,
-             has_website = excluded.has_website`,
-          [branchDealerId, b.name, groupKey || null, financeType || 'vehicle', websiteFlag]
+             has_website = excluded.has_website,
+             branch_code = excluded.branch_code`,
+          [branchDealerId, b.name, groupKey || null, financeType || 'vehicle', websiteFlag, b.code]
         );
-        console.log(`✅ Dealer branch synced: ${branchDealerId} (${b.name})`);
+        console.log(`✅ Dealer branch synced: ${branchDealerId} (${b.name}, branch_code=${b.code})`);
       }
     } else {
       await d1Query(
-        `INSERT INTO dealers (id, name, group_id, finance_type, has_website)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO dealers (id, name, group_id, finance_type, has_website, branch_code)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            group_id = excluded.group_id,
            finance_type = excluded.finance_type,
-           has_website = excluded.has_website`,
-        [key, name, groupKey || null, financeType || 'vehicle', websiteFlag]
+           has_website = excluded.has_website,
+           branch_code = excluded.branch_code`,
+        [key, name, groupKey || null, financeType || 'vehicle', websiteFlag, branch]
       );
-      console.log(`✅ Dealer synced: ${key} (${name})`);
+      console.log(`✅ Dealer synced: ${key} (${name}, branch_code=${branch})`);
     }
   } catch (err) {
     console.log(`⚠️  Analytics D1 sync failed: ${err.message}`);
