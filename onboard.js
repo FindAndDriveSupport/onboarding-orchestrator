@@ -4,6 +4,7 @@
  */
 
 import { Octokit } from '@octokit/rest';
+import crypto from 'crypto';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const sodium = require('libsodium-wrappers');
@@ -22,22 +23,24 @@ const LEADS_SYNC_CONFIG_KV_ID = '<FILL_IN_LEADS_SYNC_CONFIG_NAMESPACE_ID>';
 const ghToken     = process.env.GH_PAT;
 const cfToken     = process.env.CF_API_TOKEN;
 const cfAccountId = process.env.CF_ACCOUNT_ID;
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const payload     = JSON.parse(process.env.DEALER_PAYLOAD);
+const resendApiKey = process.env.RESEND_API_KEY; // for D1-based analytics invite email
+const payload = JSON.parse(process.env.DEALER_PAYLOAD);
 
 const {
   key, name, branch, branches,
   setupType, domains, primary,
-  financeType, seritiKey, seritiSecret, seritiDealershipId,
-  contactEmail, billingType,
+  financeType, contactEmail, billingType,
   showVehicleSelection,
   groupKey,
-  groupName,          // NEW — display name for the group, defaults to groupKey if absent
-  hasWebsite,         // NEW — explicit boolean from onboarding UI; controls the Stock nav item in analytics
-  leadDestinations,
-  kredoEnabled, kredoUsername, kredoPassword, kredoXApiKey,
-} = payload;
+  groupName,
+  hasWebsite,
+} = payload.dealer;
+
+const {
+  seritiKey, seritiSecret, seritiDealershipId,
+} = payload.seriti;
+
+const { leadDestinations } = payload;
 
 const SITE_URL = 'https://analytics.findndrive.co.za';
 const showDeposit = true, showFinance = true, showParams = true;
@@ -237,10 +240,10 @@ async function configureLeadSync() {
     seritiApiSecret: seritiSecret,
     seritiDealershipId,
     startDate: new Date().toISOString().slice(0, 10),
-    kredoEnabled: !!kredoEnabled,
-    kredoUsername: kredoUsername || '',
-    kredoPassword: kredoPassword || '',
-    kredoXApiKey: kredoXApiKey || '',
+    kredoEnabled: false,
+    kredoUsername: '',
+    kredoPassword: '',
+    kredoXApiKey: '',
     destinations: leadDestinations,
   };
 
@@ -260,17 +263,86 @@ async function configureLeadSync() {
   }
 }
 
-// ── Supabase Analytics Invite ─────────────────────────────────────────────────
-// NOTE: this still references Supabase — if you've since migrated auth to the
-// D1/JWT magic-link system, replace this with a call to your invite-dealer.ts
-// script's logic (POST /api/admin/invite on the backend worker) instead.
+// ── Analytics Invite (D1 + Resend) ─────────────────────────────────────────────
+// Creates the user row directly in the analytics D1 database and sends the
+// magic-link invite email via Resend — mirrors exactly what admin.js's
+// POST /api/admin/invite endpoint does, just run from onboard.js's own D1
+// access instead of round-tripping through the backend API (which would
+// otherwise need a way to authenticate as an admin).
 
-async function inviteDealerToAnalytics() {
-  if (!supabaseUrl || !supabaseServiceKey) {
-    console.log('⚠️  SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — skipping analytics invite');
+function generateInviteToken(length = 32) {
+  return crypto.randomBytes(length).toString('hex');
+}
+
+async function sendAnalyticsInviteEmail({ email, token, dealerName }) {
+  if (!resendApiKey) {
+    console.log('⚠️  RESEND_API_KEY not set — skipping invite email (user row still created in D1)');
     return;
   }
 
+  const link = `${SITE_URL}/auth/verify?token=${token}`;
+  const greeting = dealerName || 'there';
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f8fafc; margin: 0; padding: 40px 20px;">
+      <div style="max-width: 480px; margin: 0 auto; background: white; border-radius: 24px; padding: 40px; border: 1px solid #e2e8f0;">
+        <div style="text-align: center; margin-bottom: 32px;">
+          <table role="presentation" style="margin: 0 auto 12px; border-collapse: collapse;">
+            <tr>
+              <td style="width: 48px; height: 48px; background: #0f766e; border-radius: 16px; text-align: center; vertical-align: middle;">
+                <span style="color: white; font-size: 20px; font-weight: 900; line-height: 48px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">E</span>
+              </td>
+            </tr>
+          </table>
+          <p style="margin: 0; font-size: 13px; font-weight: 600; color: #475569; letter-spacing: 0.05em;">E-FFICIENT ANALYTICS</p>
+        </div>
+
+        <h1 style="font-size: 22px; font-weight: 700; color: #0f172a; margin: 0 0 8px;">You've been invited</h1>
+        <p style="font-size: 15px; color: #64748b; margin: 0 0 32px;">
+          Hi ${greeting}, you've been given access to your E-fficient Analytics dashboard.
+          Click below to set up your account — this link expires in 7 days.
+        </p>
+
+        <a href="${link}" style="display: block; text-align: center; background: #0f766e; color: white; text-decoration: none; padding: 14px 24px; border-radius: 12px; font-size: 15px; font-weight: 600; margin-bottom: 24px;">
+          Access your dashboard
+        </a>
+
+        <p style="font-size: 13px; color: #94a3b8; margin: 0; text-align: center;">
+          If you didn't expect this invitation, you can safely ignore this email.
+        </p>
+
+        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
+        <p style="font-size: 12px; color: #cbd5e1; margin: 0; text-align: center;">
+          Find &amp; Drive Group (Pty) Ltd · ${SITE_URL}
+        </p>
+      </div>
+    </body>
+    </html>
+  `;
+
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${resendApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from:    'E-fficient Analytics <noreply@findndrive.co.za>',
+      to:      [email],
+      subject: `You've been invited to E-fficient Analytics`,
+      html,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Failed to send invite email: ${body}`);
+  }
+}
+
+async function inviteDealerToAnalytics() {
   if (!contactEmail) {
     console.log('⚠️  No contactEmail in payload — skipping analytics invite');
     return;
@@ -279,66 +351,32 @@ async function inviteDealerToAnalytics() {
   console.log(`📧 Inviting ${contactEmail} to E-fficient Analytics...`);
 
   try {
-    const inviteRes = await fetch(`${supabaseUrl}/auth/v1/admin/invite`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${supabaseServiceKey}`,
-        'apikey': supabaseServiceKey,
-      },
-      body: JSON.stringify({
-        email: contactEmail,
-        options: {
-          redirectTo: `${SITE_URL}/auth/reset-password`,
-          data: {
-            dealer_id: key,
-            dealer_name: name,
-            finance_type: financeType || 'vehicle',
-          },
-        },
-      }),
-    });
+    const normalizedEmail = contactEmail.toLowerCase().trim();
 
-    const inviteData = await inviteRes.json();
-
-    if (!inviteRes.ok) {
-      const msg = inviteData.message || inviteData.msg || `HTTP ${inviteRes.status}`;
-      if (msg.toLowerCase().includes('already registered')) {
-        console.log(`ℹ️  ${contactEmail} already has an account — updating metadata only`);
-      } else {
-        throw new Error(msg);
-      }
+    // Check for an existing account first — same email-uniqueness rule as admin.js
+    const existingResult = await d1Query(
+      `SELECT id FROM users WHERE email = ?`,
+      [normalizedEmail]
+    );
+    const existingRows = existingResult?.[0]?.results || [];
+    if (existingRows.length > 0) {
+      console.log(`ℹ️  ${contactEmail} already has an account — skipping invite`);
+      return;
     }
 
-    const userId = inviteData.id;
+    const userId    = crypto.randomUUID();
+    const token     = generateInviteToken();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
-    if (userId) {
-      const metaRes = await fetch(`${supabaseUrl}/auth/v1/admin/users/${userId}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${supabaseServiceKey}`,
-          'apikey': supabaseServiceKey,
-        },
-        body: JSON.stringify({
-          app_metadata: {
-            dealer_id: key,
-            dealer_name: name,
-            finance_type: financeType || 'vehicle',
-          },
-        }),
-      });
+    await d1Query(
+      `INSERT INTO users (id, email, dealer_id, dealer_name, finance_type, is_admin, invite_token, invite_expires_at, status)
+       VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'invited')`,
+      [userId, normalizedEmail, key, name, financeType || 'vehicle', token, expiresAt]
+    );
 
-      if (!metaRes.ok) {
-        const metaData = await metaRes.json();
-        console.log(`⚠️  Could not set metadata: ${metaData.message || metaData.msg}`);
-      } else {
-        console.log(`✅ Metadata set for ${contactEmail} (dealer_id: ${key})`);
-      }
-    }
+    await sendAnalyticsInviteEmail({ email: normalizedEmail, token, dealerName: name });
 
     console.log(`✅ Analytics invite sent to ${contactEmail}`);
-    console.log(`   They will receive an email to set their password`);
     console.log(`   Dashboard: ${SITE_URL}`);
 
   } catch (err) {
