@@ -4,6 +4,7 @@
  */
 
 import { Octokit } from '@octokit/rest';
+import crypto from 'crypto';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const sodium = require('libsodium-wrappers');
@@ -13,29 +14,32 @@ const TEMPLATE_REPO = 'e-fficient-ui';
 const BACKEND_REPO  = 'efficient-finance-widget';
 const BACKEND_FILE  = 'workers/dealers/dealers.config.js';
 
+// D1 database that backs the analytics dashboard (postal-codes-db).
+const ANALYTICS_D1_DATABASE_ID = 'a518623c-f74b-4889-98da-d9ddda0ff632';
+
 // KV namespace that backs the leads-api Worker's dealer config (LEADS_SYNC_CONFIG binding).
-// Find it with: npx wrangler kv namespace list  (look for the leads-api project's LEADS_SYNC_CONFIG id)
-const LEADS_SYNC_CONFIG_KV_ID = '<FILL_IN_LEADS_SYNC_CONFIG_NAMESPACE_ID>';
+const LEADS_SYNC_CONFIG_KV_ID = '352dc4a8e9244b88b315a12590fd6a1a';
 
 const ghToken     = process.env.GH_PAT;
 const cfToken     = process.env.CF_API_TOKEN;
 const cfAccountId = process.env.CF_ACCOUNT_ID;
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const resendApiKey = process.env.RESEND_API_KEY; // for D1-based analytics invite email
 const payload     = JSON.parse(process.env.DEALER_PAYLOAD);
 
-// NOTE: client_payload is nested into groups (setup/theme/finance/seriti)
-// rather than flat, because GitHub's repository_dispatch API caps
-// client_payload at 10 top-level properties — the flat shape this used to
-// destructure from had 16 and would have failed every real dispatch with
-// "No more than 10 properties are allowed" (see onboarding-ui.html's
-// startDeploy() for the matching nested payload it actually sends).
+// NOTE: client_payload is nested (not flat) because GitHub's repository_dispatch
+// API caps client_payload at 10 top-level properties. This destructures the
+// ACTUAL shape onboarding-ui.html's startDeploy() sends — 4 top-level keys:
+// dealer (bundles most fields), seriti (credentials), leadDestinations,
+// showVehicleSelection.
 const {
-  key, name, domains, leadDestinations,
-  setup: { setupType, branch, branches, groupKey } = {},
-  theme: { primary } = {},
-  finance: { financeType, billingType, contactEmail, showVehicleSelection } = {},
+  dealer: {
+    key, name, branch, branches, setupType,
+    groupKey, groupName, hasWebsite,
+    domains, primary, financeType, billingType, contactEmail,
+  } = {},
   seriti: { seritiKey, seritiSecret, seritiDealershipId } = {},
+  leadDestinations,
+  showVehicleSelection,
   // Optional — only relevant if the UI exposes a Kredo toggle for this dealer.
   // Not currently sent by onboarding-ui.html; harmless if absent.
   kredoEnabled, kredoUsername, kredoPassword, kredoXApiKey,
@@ -85,13 +89,119 @@ async function commitFile(repo, path, content, message, sha) {
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// ── D1 sync (analytics access control) ────────────────────────────────────────
+
+/**
+ * Runs a SQL statement against the analytics D1 database via the REST API.
+ * onboard.js runs in GitHub Actions, outside the Worker, so it can't use
+ * the D1 binding directly — the HTTP query API is the equivalent.
+ */
+async function d1Query(sql, params = []) {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${cfAccountId}/d1/database/${ANALYTICS_D1_DATABASE_ID}/query`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${cfToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ sql, params }),
+  });
+  const data = await res.json();
+  if (!data.success) {
+    throw new Error(`D1 query failed: ${JSON.stringify(data.errors || data)}`);
+  }
+  return data.result;
+}
+
+/**
+ * Syncs this dealer (and its branches, if any) into the analytics D1 database
+ * so they appear correctly in the dealer access model — without any manual
+ * admin-side data entry.
+ *
+ * NOTE: For multi-branch dealers, each branch gets its own `dealers` row
+ * (id = "{key}__{branchCode}") sharing one `group_id`. This lets branch users
+ * log in and see only their branch, and group admins switch between branches.
+ * policy_events still stores one shared `dealer_key` + a separate `branch_code`
+ * column — report.js / mixpanel.js / dealers.js queries don't yet filter by
+ * branch_code, so branch-level policy data isn't split out yet. Flagging this
+ * as a follow-up rather than guessing at the right filtering logic here.
+ */
+async function syncAnalyticsAccess() {
+  if (!cfAccountId || !cfToken) {
+    console.log('⚠️  CF_ACCOUNT_ID or CF_API_TOKEN not set — skipping analytics D1 sync');
+    return;
+  }
+
+  console.log('🗂️  Syncing dealer into analytics access model (D1)...');
+
+  try {
+    // 1. Ensure the group exists, if this dealer belongs to one
+    if (groupKey) {
+      await d1Query(
+        `INSERT OR IGNORE INTO groups (id, name) VALUES (?, ?)`,
+        [groupKey, groupName || groupKey]
+      );
+      console.log(`✅ Group ensured: ${groupKey}`);
+    }
+
+    // 2. Insert dealer row(s)
+    const websiteFlag  = hasWebsite ? 1 : 0;
+    // Comma-separated list — tracked Mixpanel URLs reflect the dealer's own
+    // domain(s) (custom domain + seritifinance.findndrive.co.za subdomain),
+    // not a Seriti branch code, so this is what engagement filtering matches on.
+    // Include both www and non-www variants since we can't know upfront
+    // which the dealer's site actually redirects to/tracks with.
+    const domainVariants = (domains || []).flatMap(d => {
+      const bare = d.replace(/^www\./, '');
+      return [bare, `www.${bare}`];
+    });
+    const domainList = [...domainVariants, `${key}.seritifinance.findndrive.co.za`].join(',');
+
+    if (branches && branches.length > 0) {
+      for (const b of branches) {
+        const branchDealerId = `${key}__${b.code}`;
+        await d1Query(
+          `INSERT INTO dealers (id, name, group_id, finance_type, has_website, branch_code, domain)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             name = excluded.name,
+             group_id = excluded.group_id,
+             finance_type = excluded.finance_type,
+             has_website = excluded.has_website,
+             branch_code = excluded.branch_code,
+             domain = excluded.domain`,
+          [branchDealerId, b.name, groupKey || null, financeType || 'vehicle', websiteFlag, b.code, domainList]
+        );
+        console.log(`✅ Dealer branch synced: ${branchDealerId} (${b.name}, branch_code=${b.code}, domain=${domainList})`);
+      }
+    } else {
+      await d1Query(
+        `INSERT INTO dealers (id, name, group_id, finance_type, has_website, branch_code, domain)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           group_id = excluded.group_id,
+           finance_type = excluded.finance_type,
+           has_website = excluded.has_website,
+           branch_code = excluded.branch_code,
+           domain = excluded.domain`,
+        [key, name, groupKey || null, financeType || 'vehicle', websiteFlag, branch, domainList]
+      );
+      console.log(`✅ Dealer synced: ${key} (${name}, branch_code=${branch}, domain=${domainList})`);
+    }
+  } catch (err) {
+    console.log(`⚠️  Analytics D1 sync failed: ${err.message}`);
+    console.log(`   You can add this dealer manually via the admin dashboard invite flow`);
+  }
+}
+
 // ── Lead Sync Destination Config ──────────────────────────────────────────────
 
 const REQUIRED_DEST_FIELDS = {
   hubspot: ['hubspotToken'],
-  vmg:     ['dealerId'],       // vmgUsername/vmgPassword optional — falls back to shared credentials in LEADS_SYNC_CONFIG
-  cms:     ['dealerRef'],      // cmsToken and floor codes optional — floors pending widget new/used capture; cmsToken falls back to shared credentials
-  email:   ['recipientEmail'], // digest destination — see leads-api-worker.js EMAIL DIGEST DESTINATION section
+  vmg:     ['dealerId'],
+  cms:     ['dealerRef'],
+  email:   ['recipientEmail'],
 };
 
 function validateDestinations(destinations) {
@@ -131,9 +241,8 @@ async function configureLeadSync() {
     key,
     groupKey: groupKey || '',
     // Reuses the same Edith branch code already collected for the widget —
-    // doubles as the password source for the "email" digest destination's
-    // ZIP encryption (see leads-api-worker.js). For multi-branch dealers set
-    // up manually via KV, each branch object carries its own branchCode instead.
+    // doubles as the access code for the "email" digest destination's
+    // /digest/view page (see leads-api-worker.js).
     branchCode: branch || '',
     seritiApiKey: seritiKey,
     seritiApiSecret: seritiSecret,
@@ -166,14 +275,86 @@ async function configureLeadSync() {
   }
 }
 
-// ── Supabase Analytics Invite ─────────────────────────────────────────────────
+// ── Analytics Invite (D1 + Resend) ─────────────────────────────────────────────
+// Creates the user row directly in the analytics D1 database and sends the
+// magic-link invite email via Resend — mirrors exactly what admin.js's
+// POST /api/admin/invite endpoint does, just run from onboard.js's own D1
+// access instead of round-tripping through the backend API (which would
+// otherwise need a way to authenticate as an admin).
 
-async function inviteDealerToAnalytics() {
-  if (!supabaseUrl || !supabaseServiceKey) {
-    console.log('⚠️  SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — skipping analytics invite');
+function generateInviteToken(length = 32) {
+  return crypto.randomBytes(length).toString('hex');
+}
+
+async function sendAnalyticsInviteEmail({ email, token, dealerName }) {
+  if (!resendApiKey) {
+    console.log('⚠️  RESEND_API_KEY not set — skipping invite email (user row still created in D1)');
     return;
   }
 
+  const link = `${SITE_URL}/auth/verify?token=${token}`;
+  const greeting = dealerName || 'there';
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f8fafc; margin: 0; padding: 40px 20px;">
+      <div style="max-width: 480px; margin: 0 auto; background: white; border-radius: 24px; padding: 40px; border: 1px solid #e2e8f0;">
+        <div style="text-align: center; margin-bottom: 32px;">
+          <table role="presentation" style="margin: 0 auto 12px; border-collapse: collapse;">
+            <tr>
+              <td style="width: 48px; height: 48px; background: #0f766e; border-radius: 16px; text-align: center; vertical-align: middle;">
+                <span style="color: white; font-size: 20px; font-weight: 900; line-height: 48px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">E</span>
+              </td>
+            </tr>
+          </table>
+          <p style="margin: 0; font-size: 13px; font-weight: 600; color: #475569; letter-spacing: 0.05em;">E-FFICIENT ANALYTICS</p>
+        </div>
+
+        <h1 style="font-size: 22px; font-weight: 700; color: #0f172a; margin: 0 0 8px;">You've been invited</h1>
+        <p style="font-size: 15px; color: #64748b; margin: 0 0 32px;">
+          Hi ${greeting}, you've been given access to your E-fficient Analytics dashboard.
+          Click below to set up your account — this link expires in 7 days.
+        </p>
+
+        <a href="${link}" style="display: block; text-align: center; background: #0f766e; color: white; text-decoration: none; padding: 14px 24px; border-radius: 12px; font-size: 15px; font-weight: 600; margin-bottom: 24px;">
+          Access your dashboard
+        </a>
+
+        <p style="font-size: 13px; color: #94a3b8; margin: 0; text-align: center;">
+          If you didn't expect this invitation, you can safely ignore this email.
+        </p>
+
+        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
+        <p style="font-size: 12px; color: #cbd5e1; margin: 0; text-align: center;">
+          Find &amp; Drive Group (Pty) Ltd · ${SITE_URL}
+        </p>
+      </div>
+    </body>
+    </html>
+  `;
+
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${resendApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from:    'E-fficient Analytics <noreply@findndrive.co.za>',
+      to:      [email],
+      subject: `You've been invited to E-fficient Analytics`,
+      html,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Failed to send invite email: ${body}`);
+  }
+}
+
+async function inviteDealerToAnalytics() {
   if (!contactEmail) {
     console.log('⚠️  No contactEmail in payload — skipping analytics invite');
     return;
@@ -182,73 +363,35 @@ async function inviteDealerToAnalytics() {
   console.log(`📧 Inviting ${contactEmail} to E-fficient Analytics...`);
 
   try {
-    // Step 1: Send invite email (Supabase handles the email)
-    const inviteRes = await fetch(`${supabaseUrl}/auth/v1/admin/invite`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${supabaseServiceKey}`,
-        'apikey': supabaseServiceKey,
-      },
-      body: JSON.stringify({
-        email: contactEmail,
-        options: {
-          redirectTo: `${SITE_URL}/auth/reset-password`,
-          data: {
-            dealer_id: key,
-            dealer_name: name,
-            finance_type: financeType || 'vehicle',
-          },
-        },
-      }),
-    });
+    const normalizedEmail = contactEmail.toLowerCase().trim();
 
-    const inviteData = await inviteRes.json();
-
-    if (!inviteRes.ok) {
-      const msg = inviteData.message || inviteData.msg || `HTTP ${inviteRes.status}`;
-      // If already registered, just update their metadata
-      if (msg.toLowerCase().includes('already registered')) {
-        console.log(`ℹ️  ${contactEmail} already has an account — updating metadata only`);
-      } else {
-        throw new Error(msg);
-      }
+    // Check for an existing account first — same email-uniqueness rule as admin.js
+    const existingResult = await d1Query(
+      `SELECT id FROM users WHERE email = ?`,
+      [normalizedEmail]
+    );
+    const existingRows = existingResult?.[0]?.results || [];
+    if (existingRows.length > 0) {
+      console.log(`ℹ️  ${contactEmail} already has an account — skipping invite`);
+      return;
     }
 
-    const userId = inviteData.id;
+    const userId    = crypto.randomUUID();
+    const token     = generateInviteToken();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
-    // Step 2: Set app_metadata so dealer_id is in the JWT
-    if (userId) {
-      const metaRes = await fetch(`${supabaseUrl}/auth/v1/admin/users/${userId}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${supabaseServiceKey}`,
-          'apikey': supabaseServiceKey,
-        },
-        body: JSON.stringify({
-          app_metadata: {
-            dealer_id: key,
-            dealer_name: name,
-            finance_type: financeType || 'vehicle',
-          },
-        }),
-      });
+    await d1Query(
+      `INSERT INTO users (id, email, dealer_id, dealer_name, finance_type, is_admin, invite_token, invite_expires_at, status)
+       VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'invited')`,
+      [userId, normalizedEmail, key, name, financeType || 'vehicle', token, expiresAt]
+    );
 
-      if (!metaRes.ok) {
-        const metaData = await metaRes.json();
-        console.log(`⚠️  Could not set metadata: ${metaData.message || metaData.msg}`);
-      } else {
-        console.log(`✅ Metadata set for ${contactEmail} (dealer_id: ${key})`);
-      }
-    }
+    await sendAnalyticsInviteEmail({ email: normalizedEmail, token, dealerName: name });
 
     console.log(`✅ Analytics invite sent to ${contactEmail}`);
-    console.log(`   They will receive an email to set their password`);
     console.log(`   Dashboard: ${SITE_URL}`);
 
   } catch (err) {
-    // Non-fatal — don't fail the whole onboarding if analytics invite fails
     console.log(`⚠️  Analytics invite failed: ${err.message}`);
     console.log(`   You can manually invite them later from the admin dashboard`);
   }
@@ -263,6 +406,7 @@ async function main() {
     console.log(`📬 Lead destinations: ${leadDestinations.map(d => d.type).join(', ')}`);
   }
   if (groupKey) console.log(`🏢 Dealer group: ${groupKey}`);
+  if (hasWebsite) console.log(`🌐 Dealer website hosting: enabled (Stock nav will show)`);
 
   // 1. Update backend dealers.config.js
   console.log('📝 Updating backend config...');
@@ -451,9 +595,12 @@ async function main() {
   console.log('📊 Inviting dealer to analytics dashboard...');
   await inviteDealerToAnalytics();
 
-  // 14. Configure lead sync destinations (HubSpot / CMS / VMG — chosen in the UI)
+  // 14. Configure lead sync destinations
   console.log('🔀 Configuring lead sync destinations...');
   await configureLeadSync();
+
+  // 15. Sync dealer/group into analytics D1 access model
+  await syncAnalyticsAccess();
 
   console.log(`\n✅ Dealer ${name} onboarded successfully!\n`);
   console.log(`Repo: https://github.com/${GH_ORG}/${repoName}`);
@@ -465,6 +612,7 @@ async function main() {
   if (setupType === 'multi-branch') {
     console.log(`🔀 Multi-branch setup — ${branches.length} branches configured`);
     console.log(`   Branch selector will be shown to users on the application form`);
+    console.log(`   Each branch also has its own analytics dealer row (id = "${key}__<branchCode>")`);
   }
   if (setupType === 'multi-site') {
     console.log(`ℹ️  Multi-site setup — run onboarding again for each additional branch`);
