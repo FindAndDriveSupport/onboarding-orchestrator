@@ -536,11 +536,379 @@ async function main() {
   // 4. Commit DealerContext.tsx
   console.log('⚙️  Committing DealerContext.tsx...');
   const dealerContextSha = await getFileSha(repoName, 'src/contexts/DealerContext.tsx');
-  await commitFile(repoName, 'src/contexts/DealerContext.tsx', buildDe
+  await commitFile(repoName, 'src/contexts/DealerContext.tsx', buildDealerContext(), `chore: update DealerContext to read from dealerConfig`, dealerContextSha);
 
-  // ⚠️ NOTE: the file you pasted was truncated at exactly this point
-  // ("buildDe") — everything below this line in the original main()
-  // function (steps 5 onward, plus the closing of main() itself) is NOT
-  // included here because I don't have that content. Paste the rest of
-  // the file and I'll merge it back in properly rather than guessing at
-  // what it contains.
+  // 5. Commit wrangler.toml
+  console.log('⚙️  Committing wrangler.toml...');
+  const wranglerSha = await getFileSha(repoName, 'wrangler.toml');
+  const wranglerContent = `name       = "e-fficient-ui-${key}"\nmain       = "dist/server/server.js"\ncompatibility_date = "2024-01-01"\ncompatibility_flags = ["nodejs_compat"]\nassets = { directory = "dist/client" }\ntail_consumers = [{ service = "alert-worker" }]\n\n[vars]\nNODE_ENV = "production"\n\n[observability.logs]\nenabled = true\ninvocation_logs = true\n`;
+  await commitFile(repoName, 'wrangler.toml', wranglerContent, `chore: set wrangler name for ${key}`, wranglerSha);
+
+  // 6. Commit .env
+  console.log('⚙️  Committing .env...');
+  const envSha = await getFileSha(repoName, '.env');
+  const envContent = `VITE_WORKER_URL=https://seritifinance.findndrive.co.za\nVITE_DEFAULT_DEALER=${key}\n`;
+  await commitFile(repoName, '.env', envContent, `chore: set env vars for ${key}`, envSha);
+
+  // 7. Commit route index.tsx with dealer SEO
+  console.log('🔍 Committing SEO route...');
+  const routeSha = await getFileSha(repoName, 'src/routes/index.tsx');
+  await commitFile(repoName, 'src/routes/index.tsx', buildRouteIndex(), `seo: add dealer meta tags for ${key}`, routeSha);
+
+  // 8. Commit GitHub Actions workflow
+  console.log('⚙️  Committing deploy workflow...');
+  const workflowSha = await getFileSha(repoName, '.github/workflows/deploy.yml');
+  await commitFile(repoName, '.github/workflows/deploy.yml', buildWorkflow(), `ci: add Cloudflare Workers deploy workflow`, workflowSha);
+
+  // 9. Set GitHub secrets
+  console.log('🔐 Setting GitHub secrets...');
+  await setSecret(repoName, 'CLOUDFLARE_API_TOKEN', cfToken);
+  await setSecret(repoName, 'CLOUDFLARE_ACCOUNT_ID', cfAccountId);
+
+  // 10. Store Seriti credentials in Cloudflare KV
+  console.log('🔐 Storing Seriti credentials in KV...');
+  if (seritiKey && seritiSecret) {
+    const kvNamespaceId = '16c7bf807bc0445ab0420a16f2352c0d';
+    const cfBase = `https://api.cloudflare.com/client/v4/accounts/${cfAccountId}/storage/kv/namespaces/${kvNamespaceId}/values`;
+    await fetch(`${cfBase}/SERITI_KEY_${key}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${cfToken}`, 'Content-Type': 'text/plain' },
+      body: seritiKey,
+    });
+    await fetch(`${cfBase}/SERITI_SECRET_${key}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${cfToken}`, 'Content-Type': 'text/plain' },
+      body: seritiSecret,
+    });
+    console.log('✅ Seriti credentials stored in KV');
+  }
+
+  // 11. Trigger first deployment
+  console.log('🚀 Triggering first deployment...');
+  await sleep(2000);
+  try {
+    await octokit.actions.createWorkflowDispatch({
+      owner: GH_ORG, repo: repoName,
+      workflow_id: 'deploy.yml',
+      ref: 'main',
+    });
+    console.log('✅ Deployment triggered');
+  } catch (e) {
+    console.log('⚠️  Could not trigger workflow dispatch — it will run on next push');
+  }
+
+  console.log('⏳ Waiting for deployment to complete before binding custom domain...');
+  await sleep(90000);
+
+  // 12. Add Cloudflare Custom Domain
+  console.log('🌐 Adding Cloudflare Custom Domain...');
+  try {
+    const zoneRes = await fetch(
+      `https://api.cloudflare.com/client/v4/zones?name=findndrive.co.za`,
+      { headers: { Authorization: `Bearer ${cfToken}` } }
+    );
+    const zoneData = await zoneRes.json();
+    const zoneId = zoneData.result?.[0]?.id;
+    if (zoneId) {
+      const hostname = `${key}.seritifinance.findndrive.co.za`;
+      const domainRes = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${cfAccountId}/workers/domains`,
+        {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${cfToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            hostname,
+            zone_id: zoneId,
+            service: `e-fficient-ui-${key}`,
+          }),
+        }
+      );
+      const domainData = await domainRes.json();
+      if (domainData.success) {
+        console.log(`✅ Custom domain added: ${hostname}`);
+      } else {
+        console.log(`⚠️  Custom domain response:`, JSON.stringify(domainData.errors || domainData));
+      }
+    }
+  } catch (e) {
+    console.log('⚠️  Could not add custom domain automatically:', e.message);
+  }
+
+  // 13. Invite dealer to E-fficient Analytics dashboard
+  console.log('📊 Inviting dealer to analytics dashboard...');
+  await inviteDealerToAnalytics();
+
+  // 14. Configure lead sync destinations
+  console.log('🔀 Configuring lead sync destinations...');
+  await configureLeadSync();
+
+  // 15. Sync dealer/group into analytics D1 access model
+  await syncAnalyticsAccess();
+
+  console.log(`\n✅ Dealer ${name} onboarded successfully!\n`);
+  console.log(`Repo: https://github.com/${GH_ORG}/${repoName}`);
+  console.log(`Analytics: ${SITE_URL}`);
+  if (vehicleSelectionEnabled) console.log(`🚗 Vehicle selection page enabled for this dealer`);
+  if (leadDestinations && leadDestinations.length) {
+    console.log(`📬 Leads will sync to: ${leadDestinations.map(d => d.type).join(', ')}`);
+  }
+  if (setupType === 'multi-branch') {
+    console.log(`🔀 Multi-branch setup — ${branches.length} branches configured`);
+    console.log(`   Branch selector will be shown to users on the application form`);
+    console.log(`   Each branch also has its own analytics dealer row (id = "${key}__<branchCode>")`);
+  }
+  if (setupType === 'multi-site') {
+    console.log(`ℹ️  Multi-site setup — run onboarding again for each additional branch`);
+  }
+}
+
+function buildRouteIndex() {
+  const isBike = financeType === 'bike';
+  const assetType = isBike ? 'bike' : 'vehicle';
+  const canonicalUrl = `https://${key}.seritifinance.findndrive.co.za`;
+  const title = `${name} — ${isBike ? 'Bike' : 'Vehicle'} Finance`;
+  const description = `Check your ${assetType} finance affordability with ${name} in 60 seconds. No credit impact. Get an instant estimate powered by FindAndDrive.`;
+
+  const jsonLd = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "FinancialProduct",
+    "name": `${name} ${isBike ? 'Bike' : 'Vehicle'} Finance`,
+    "description": description,
+    "url": canonicalUrl,
+    "provider": {
+      "@type": "Organization",
+      "name": name,
+      "url": domains[0] ? `https://${domains[0]}` : canonicalUrl,
+    },
+    "feesAndCommissionsSpecification": "No application fee. No credit impact.",
+    "areaServed": {
+      "@type": "Country",
+      "name": "South Africa",
+    },
+  });
+
+  return `import { createFileRoute } from "@tanstack/react-router";
+import { Wizard } from "@/components/wizard/Wizard";
+
+export const Route = createFileRoute("/")({
+  head: () => ({
+    meta: [
+      { title: "${title}" },
+      { name: "description", content: "${description}" },
+      { name: "robots", content: "index, follow" },
+      { property: "og:type", content: "website" },
+      { property: "og:url", content: "${canonicalUrl}" },
+      { property: "og:title", content: "${title}" },
+      { property: "og:description", content: "${description}" },
+      { property: "og:site_name", content: "${name}" },
+      { name: "twitter:card", content: "summary" },
+      { name: "twitter:title", content: "${title}" },
+      { name: "twitter:description", content: "${description}" },
+      { name: "theme-color", content: "${primary}" },
+    ],
+    links: [
+      { rel: "canonical", href: "${canonicalUrl}" },
+    ],
+    scripts: [
+      {
+        type: "application/ld+json",
+        children: \`${jsonLd}\`,
+      },
+    ],
+  }),
+  component: Index,
+});
+
+function Index() {
+  return <Wizard />;
+}
+`;
+}
+
+function buildDealerConfig() {
+  return `export interface DealerTheme {
+  primary?: string;
+  primaryLight?: string;
+  primaryDark?: string;
+  gradient?: string;
+  fontFamily?: string;
+  borderRadius?: string;
+  logoUrl?: string;
+}
+
+export interface DealerFeatures {
+  showDeposit: boolean;
+  showCurrentFinance: boolean;
+  vehicleQueryParams: boolean;
+  showVehicleSelection?: boolean;
+}
+
+export interface DealerBranch {
+  code: string;
+  name: string;
+}
+
+export interface DealerEntry {
+  name: string;
+  branchCode: string;
+  financeType: string;
+  allowedDomains: string[];
+  theme: DealerTheme;
+  features: DealerFeatures;
+  branches?: DealerBranch[];
+}
+
+export interface DealerConfig {
+  key: string;
+  name: string;
+  branchCode: string;
+  financeType: string;
+  allowedDomains: string[];
+  theme: DealerTheme;
+  features: DealerFeatures;
+  branches?: DealerBranch[];
+}
+
+export const DEALERS: Record<string, DealerEntry> = {
+  '${key}': {
+    name: '${name}',
+    branchCode: '${branch}',
+    financeType: '${financeType || "vehicle"}',
+    allowedDomains: [${domains.map(d => `'${d}'`).join(', ')}, '${key}.seritifinance.findndrive.co.za'],${branches && branches.length > 0 ? `
+    branches: [${branches.map(b => `\n      { code: '${b.code}', name: '${b.name}' },`).join('')}
+    ],` : ''}
+    theme: {
+      primary: '${primary}',
+      gradient: 'linear-gradient(135deg, ${primary} 0%, ${primary} 100%)',
+      fontFamily: "'Inter', sans-serif",
+      borderRadius: '12px',
+    },
+    features: {
+      showDeposit: ${showDeposit},
+      showCurrentFinance: ${showFinance},
+      vehicleQueryParams: ${showParams},${vehicleSelectionEnabled ? '\n      showVehicleSelection: true,' : ''}
+    },
+  },
+};
+
+export const DEFAULT_DEALER_KEY = '${key}';
+
+export function getDealerConfig(key?: string): DealerConfig {
+  const resolved = key && DEALERS[key] ? key : DEFAULT_DEALER_KEY;
+  const entry = DEALERS[resolved] ?? DEALERS[DEFAULT_DEALER_KEY];
+  return { key: resolved, ...entry };
+}
+`;
+}
+
+function buildWorkflow() {
+  return `name: Deploy to Cloudflare Workers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --ignore-scripts
+
+      - name: Build
+        run: bun run build
+        env:
+          VITE_WORKER_URL: https://seritifinance.findndrive.co.za
+          VITE_DEFAULT_DEALER: ${key}
+
+      - name: Deploy to Cloudflare Workers
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: \${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: \${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+`;
+}
+
+function buildDealerContext() {
+  return `import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEmbed } from "./EmbedContext";
+import { getDealerConfig } from "@/config/dealerConfig";
+
+export interface DealerTheme {
+  primary?: string;
+  primaryLight?: string;
+  primaryDark?: string;
+  gradient?: string;
+  fontFamily?: string;
+  borderRadius?: string;
+  logoUrl?: string;
+}
+
+export interface DealerFeatures {
+  showDeposit: boolean;
+  showCurrentFinance: boolean;
+  vehicleQueryParams: boolean;
+  showVehicleSelection?: boolean;
+}
+
+export interface DealerBranch {
+  code: string;
+  name: string;
+}
+
+export interface DealerConfig {
+  key: string;
+  name: string;
+  branchCode: string;
+  financeType: string;
+  theme: DealerTheme;
+  features: DealerFeatures;
+  branches?: DealerBranch[];
+}
+
+const DEFAULT_CONFIG: DealerConfig = {
+  key: "default",
+  name: "Vehicle Finance",
+  branchCode: "",
+  financeType: "vehicle",
+  theme: {},
+  features: { showDeposit: true, showCurrentFinance: true, vehicleQueryParams: true },
+};
+
+const DealerContext = createContext<DealerConfig>(DEFAULT_CONFIG);
+
+export function DealerProvider({ children }: { children: ReactNode }) {
+  const { dealer } = useEmbed();
+  const [config, setConfig] = useState<DealerConfig>(DEFAULT_CONFIG);
+
+  useEffect(() => {
+    const dealerConfig = getDealerConfig(dealer);
+    setConfig(dealerConfig);
+
+    const t = dealerConfig.theme || {};
+    const root = document.documentElement;
+    if (t.primary)      root.style.setProperty("--dealer-primary", t.primary);
+    if (t.gradient)     root.style.setProperty("--gradient-primary", t.gradient);
+    if (t.borderRadius) root.style.setProperty("--radius", t.borderRadius);
+    if (t.fontFamily)   root.style.setProperty("--font-family", t.fontFamily);
+  }, [dealer]);
+
+  const value = useMemo(() => config, [config]);
+
+  return <DealerContext.Provider value={value}>{children}</DealerContext.Provider>;
+}
+
+export function useDealer() {
+  return useContext(DealerContext);
+}
+`;
+}
+
+main().catch(e => { console.error('❌ Onboarding failed:', e.message); process.exit(1); });
