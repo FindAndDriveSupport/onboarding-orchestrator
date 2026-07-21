@@ -466,7 +466,7 @@ async function main() {
     const newEntry = `
   '${key}': {
     name: '${name}',
-    branchCode: '${branch}',
+    branchCode: '${branch}',${seritiDealershipId ? `\n    dealershipID: '${seritiDealershipId}',` : ''}
     financeType: '${financeType || "vehicle"}',
     edithEnv: 'prod',
     contactEmail: '${contactEmail || ""}',
