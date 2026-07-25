@@ -14,23 +14,15 @@ const TEMPLATE_REPO = 'e-fficient-ui';
 const BACKEND_REPO  = 'efficient-finance-widget';
 const BACKEND_FILE  = 'workers/dealers/dealers.config.js';
 
-// D1 database that backs the analytics dashboard (postal-codes-db).
 const ANALYTICS_D1_DATABASE_ID = 'a518623c-f74b-4889-98da-d9ddda0ff632';
-
-// KV namespace that backs the leads-api Worker's dealer config (LEADS_SYNC_CONFIG binding).
 const LEADS_SYNC_CONFIG_KV_ID = '352dc4a8e9244b88b315a12590fd6a1a';
 
 const ghToken     = process.env.GH_PAT;
 const cfToken     = process.env.CF_API_TOKEN;
 const cfAccountId = process.env.CF_ACCOUNT_ID;
-const resendApiKey = process.env.RESEND_API_KEY; // for D1-based analytics invite email
+const resendApiKey = process.env.RESEND_API_KEY;
 const payload     = JSON.parse(process.env.DEALER_PAYLOAD);
 
-// NOTE: client_payload is nested (not flat) because GitHub's repository_dispatch
-// API caps client_payload at 10 top-level properties. This destructures the
-// ACTUAL shape onboarding-ui.html's startDeploy() sends — 4 top-level keys:
-// dealer (bundles most fields), seriti (credentials), leadDestinations,
-// showVehicleSelection.
 const {
   dealer: {
     key, name, branch, branches, setupType,
@@ -40,8 +32,6 @@ const {
   seriti: { seritiKey, seritiSecret, seritiDealershipId } = {},
   leadDestinations,
   showVehicleSelection,
-  // Optional — only relevant if the UI exposes a Kredo toggle for this dealer.
-  // Not currently sent by onboarding-ui.html; harmless if absent.
   kredoEnabled, kredoUsername, kredoPassword, kredoXApiKey,
 } = payload;
 
@@ -99,18 +89,6 @@ async function getFileShaAndDelete(repo, path, message) {
   console.log(`🗑️  Deleted ${path} from ${repo}`);
 }
 
-// createUsingTemplate() copies the ENTIRE template repo, .github/workflows/
-// included — there's no API option to exclude specific paths. Two of those
-// workflows (sync-template-to-dealer.yml, sync-from-dev.yml) orchestrate
-// ACROSS repos and only make sense running in the template repo itself; if
-// left in a dealer repo they'd either fail outright (missing GH_PAT secret —
-// "Input required and not supplied: token") or, worse, silently no-op every
-// time they're accidentally triggered. Deleted here, right after creation,
-// rather than relying solely on the `if: github.repository == ...` guards
-// those files carry — belt and suspenders, and this way dealer repos don't
-// carry dead files or generate phantom skipped Action runs at all.
-// deploy.yml / audit-vehicle.yml / restore-dev.yml are deliberately left in
-// place — those are dealer-specific operational workflows each repo needs.
 async function removeTemplateOnlyWorkflows(repo) {
   console.log('🧹 Removing template-only workflows from new dealer repo...');
   const templateOnlyWorkflows = [
@@ -130,11 +108,6 @@ async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ── D1 sync (analytics access control) ────────────────────────────────────────
 
-/**
- * Runs a SQL statement against the analytics D1 database via the REST API.
- * onboard.js runs in GitHub Actions, outside the Worker, so it can't use
- * the D1 binding directly — the HTTP query API is the equivalent.
- */
 async function d1Query(sql, params = []) {
   const url = `https://api.cloudflare.com/client/v4/accounts/${cfAccountId}/d1/database/${ANALYTICS_D1_DATABASE_ID}/query`;
   const res = await fetch(url, {
@@ -164,6 +137,19 @@ async function d1Query(sql, params = []) {
  * column — report.js / mixpanel.js / dealers.js queries don't yet filter by
  * branch_code, so branch-level policy data isn't split out yet. Flagging this
  * as a follow-up rather than guessing at the right filtering logic here.
+ *
+ * seriti_dealership_id: written from the top-level payload's
+ * seritiDealershipId — already collected by the onboarding UI and already
+ * used by configureLeadSync() below for leads_sync_config, just never
+ * previously persisted to D1. This is what report.js/dealers.js actually
+ * use for the GUID-based dealer identification (see splitByClient in
+ * seritiApiService.js) — without this, every new dealer needs the same
+ * manual SQL backfill Alpine Motors/Yonda/etc. all needed.
+ *
+ * For multi-branch dealers: each branch object doesn't currently carry its
+ * own dealershipId from the onboarding UI (only code + name are collected
+ * per branch row today) — b.dealershipId is threaded through here in case
+ * that field gets added later, but will be null for now, same as before.
  */
 async function syncAnalyticsAccess() {
   if (!cfAccountId || !cfToken) {
@@ -174,7 +160,6 @@ async function syncAnalyticsAccess() {
   console.log('🗂️  Syncing dealer into analytics access model (D1)...');
 
   try {
-    // 1. Ensure the group exists, if this dealer belongs to one
     if (groupKey) {
       await d1Query(
         `INSERT OR IGNORE INTO groups (id, name) VALUES (?, ?)`,
@@ -183,13 +168,7 @@ async function syncAnalyticsAccess() {
       console.log(`✅ Group ensured: ${groupKey}`);
     }
 
-    // 2. Insert dealer row(s)
     const websiteFlag  = hasWebsite ? 1 : 0;
-    // Comma-separated list — tracked Mixpanel URLs reflect the dealer's own
-    // domain(s) (custom domain + seritifinance.findndrive.co.za subdomain),
-    // not a Seriti branch code, so this is what engagement filtering matches on.
-    // Include both www and non-www variants since we can't know upfront
-    // which the dealer's site actually redirects to/tracks with.
     const domainVariants = (domains || []).flatMap(d => {
       const bare = d.replace(/^www\./, '');
       return [bare, `www.${bare}`];
@@ -200,33 +179,35 @@ async function syncAnalyticsAccess() {
       for (const b of branches) {
         const branchDealerId = `${key}__${b.code}`;
         await d1Query(
-          `INSERT INTO dealers (id, name, group_id, finance_type, has_website, branch_code, domain)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO dealers (id, name, group_id, finance_type, has_website, branch_code, domain, seriti_dealership_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              name = excluded.name,
              group_id = excluded.group_id,
              finance_type = excluded.finance_type,
              has_website = excluded.has_website,
              branch_code = excluded.branch_code,
-             domain = excluded.domain`,
-          [branchDealerId, b.name, groupKey || null, financeType || 'vehicle', websiteFlag, b.code, domainList]
+             domain = excluded.domain,
+             seriti_dealership_id = COALESCE(excluded.seriti_dealership_id, dealers.seriti_dealership_id)`,
+          [branchDealerId, b.name, groupKey || null, financeType || 'vehicle', websiteFlag, b.code, domainList, b.dealershipId || null]
         );
-        console.log(`✅ Dealer branch synced: ${branchDealerId} (${b.name}, branch_code=${b.code}, domain=${domainList})`);
+        console.log(`✅ Dealer branch synced: ${branchDealerId} (${b.name}, branch_code=${b.code}, domain=${domainList}, seriti_dealership_id=${b.dealershipId || 'not provided'})`);
       }
     } else {
       await d1Query(
-        `INSERT INTO dealers (id, name, group_id, finance_type, has_website, branch_code, domain)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO dealers (id, name, group_id, finance_type, has_website, branch_code, domain, seriti_dealership_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            group_id = excluded.group_id,
            finance_type = excluded.finance_type,
            has_website = excluded.has_website,
            branch_code = excluded.branch_code,
-           domain = excluded.domain`,
-        [key, name, groupKey || null, financeType || 'vehicle', websiteFlag, branch, domainList]
+           domain = excluded.domain,
+           seriti_dealership_id = COALESCE(excluded.seriti_dealership_id, dealers.seriti_dealership_id)`,
+        [key, name, groupKey || null, financeType || 'vehicle', websiteFlag, branch, domainList, seritiDealershipId || null]
       );
-      console.log(`✅ Dealer synced: ${key} (${name}, branch_code=${branch}, domain=${domainList})`);
+      console.log(`✅ Dealer synced: ${key} (${name}, branch_code=${branch}, domain=${domainList}, seriti_dealership_id=${seritiDealershipId || 'not provided'})`);
     }
   } catch (err) {
     console.log(`⚠️  Analytics D1 sync failed: ${err.message}`);
@@ -279,9 +260,6 @@ async function configureLeadSync() {
   const leadsSyncConfig = {
     key,
     groupKey: groupKey || '',
-    // Reuses the same Edith branch code already collected for the widget —
-    // doubles as the access code for the "email" digest destination's
-    // /digest/view page (see leads-api-worker.js).
     branchCode: branch || '',
     seritiApiKey: seritiKey,
     seritiApiSecret: seritiSecret,
@@ -315,11 +293,6 @@ async function configureLeadSync() {
 }
 
 // ── Analytics Invite (D1 + Resend) ─────────────────────────────────────────────
-// Creates the user row directly in the analytics D1 database and sends the
-// magic-link invite email via Resend — mirrors exactly what admin.js's
-// POST /api/admin/invite endpoint does, just run from onboard.js's own D1
-// access instead of round-tripping through the backend API (which would
-// otherwise need a way to authenticate as an admin).
 
 function generateInviteToken(length = 32) {
   return crypto.randomBytes(length).toString('hex');
@@ -404,7 +377,6 @@ async function inviteDealerToAnalytics() {
   try {
     const normalizedEmail = contactEmail.toLowerCase().trim();
 
-    // Check for an existing account first — same email-uniqueness rule as admin.js
     const existingResult = await d1Query(
       `SELECT id FROM users WHERE email = ?`,
       [normalizedEmail]
@@ -447,7 +419,6 @@ async function main() {
   if (groupKey) console.log(`🏢 Dealer group: ${groupKey}`);
   if (hasWebsite) console.log(`🌐 Dealer website hosting: enabled (Stock nav will show)`);
 
-  // 1. Update backend dealers.config.js
   console.log('📝 Updating backend config...');
   const { data: fileData } = await octokit.repos.getContent({
     owner: GH_ORG, repo: BACKEND_REPO, path: BACKEND_FILE,
@@ -462,7 +433,6 @@ async function main() {
     const branchesStr = branches && branches.length > 0
       ? `    branches: [\n${branches.map(b => `      { code: '${b.code}', name: '${b.name}' },`).join('\n')}\n    ],`
       : '';
-
     const newEntry = `
   '${key}': {
     name: '${name}',
@@ -503,7 +473,6 @@ async function main() {
     await commitFile(BACKEND_REPO, BACKEND_FILE, updatedContent, `feat: add dealer ${key}`, fileData.sha);
   }
 
-  // 2. Create frontend repo from template
   console.log('📦 Creating frontend repo...');
   const repoName = `e-fficient-ui-${key}`;
   try {
@@ -524,48 +493,38 @@ async function main() {
     } else throw e;
   }
 
-  // 2b. Remove template-only orchestration workflows — see
-  // removeTemplateOnlyWorkflows() above for why this is needed.
   await removeTemplateOnlyWorkflows(repoName);
 
-  // 3. Commit dealerConfig.ts
   console.log('⚙️  Committing dealerConfig.ts...');
   const configSha = await getFileSha(repoName, 'src/config/dealerConfig.ts');
   await commitFile(repoName, 'src/config/dealerConfig.ts', buildDealerConfig(), `chore: configure dealer ${key}`, configSha);
 
-  // 4. Commit DealerContext.tsx
   console.log('⚙️  Committing DealerContext.tsx...');
   const dealerContextSha = await getFileSha(repoName, 'src/contexts/DealerContext.tsx');
   await commitFile(repoName, 'src/contexts/DealerContext.tsx', buildDealerContext(), `chore: update DealerContext to read from dealerConfig`, dealerContextSha);
 
-  // 5. Commit wrangler.toml
   console.log('⚙️  Committing wrangler.toml...');
   const wranglerSha = await getFileSha(repoName, 'wrangler.toml');
   const wranglerContent = `name       = "e-fficient-ui-${key}"\nmain       = "dist/server/server.js"\ncompatibility_date = "2024-01-01"\ncompatibility_flags = ["nodejs_compat"]\nassets = { directory = "dist/client" }\ntail_consumers = [{ service = "alert-worker" }]\n\n[vars]\nNODE_ENV = "production"\n\n[observability.logs]\nenabled = true\ninvocation_logs = true\n`;
   await commitFile(repoName, 'wrangler.toml', wranglerContent, `chore: set wrangler name for ${key}`, wranglerSha);
 
-  // 6. Commit .env
   console.log('⚙️  Committing .env...');
   const envSha = await getFileSha(repoName, '.env');
   const envContent = `VITE_WORKER_URL=https://seritifinance.findndrive.co.za\nVITE_DEFAULT_DEALER=${key}\n`;
   await commitFile(repoName, '.env', envContent, `chore: set env vars for ${key}`, envSha);
 
-  // 7. Commit route index.tsx with dealer SEO
   console.log('🔍 Committing SEO route...');
   const routeSha = await getFileSha(repoName, 'src/routes/index.tsx');
   await commitFile(repoName, 'src/routes/index.tsx', buildRouteIndex(), `seo: add dealer meta tags for ${key}`, routeSha);
 
-  // 8. Commit GitHub Actions workflow
   console.log('⚙️  Committing deploy workflow...');
   const workflowSha = await getFileSha(repoName, '.github/workflows/deploy.yml');
   await commitFile(repoName, '.github/workflows/deploy.yml', buildWorkflow(), `ci: add Cloudflare Workers deploy workflow`, workflowSha);
 
-  // 9. Set GitHub secrets
   console.log('🔐 Setting GitHub secrets...');
   await setSecret(repoName, 'CLOUDFLARE_API_TOKEN', cfToken);
   await setSecret(repoName, 'CLOUDFLARE_ACCOUNT_ID', cfAccountId);
 
-  // 10. Store Seriti credentials in Cloudflare KV
   console.log('🔐 Storing Seriti credentials in KV...');
   if (seritiKey && seritiSecret) {
     const kvNamespaceId = '16c7bf807bc0445ab0420a16f2352c0d';
@@ -583,7 +542,6 @@ async function main() {
     console.log('✅ Seriti credentials stored in KV');
   }
 
-  // 11. Trigger first deployment
   console.log('🚀 Triggering first deployment...');
   await sleep(2000);
   try {
@@ -600,7 +558,6 @@ async function main() {
   console.log('⏳ Waiting for deployment to complete before binding custom domain...');
   await sleep(90000);
 
-  // 12. Add Cloudflare Custom Domain
   console.log('🌐 Adding Cloudflare Custom Domain...');
   try {
     const zoneRes = await fetch(
@@ -634,15 +591,12 @@ async function main() {
     console.log('⚠️  Could not add custom domain automatically:', e.message);
   }
 
-  // 13. Invite dealer to E-fficient Analytics dashboard
   console.log('📊 Inviting dealer to analytics dashboard...');
   await inviteDealerToAnalytics();
 
-  // 14. Configure lead sync destinations
   console.log('🔀 Configuring lead sync destinations...');
   await configureLeadSync();
 
-  // 15. Sync dealer/group into analytics D1 access model
   await syncAnalyticsAccess();
 
   console.log(`\n✅ Dealer ${name} onboarded successfully!\n`);
