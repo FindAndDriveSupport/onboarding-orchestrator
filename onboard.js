@@ -218,10 +218,11 @@ async function syncAnalyticsAccess() {
 // ── Lead Sync Destination Config ──────────────────────────────────────────────
 
 const REQUIRED_DEST_FIELDS = {
-  hubspot: ['hubspotToken'],
-  vmg:     ['dealerId'],
-  cms:     ['dealerRef'],
-  email:   ['recipientEmail'],
+  hubspot:  ['hubspotToken'],
+  vmg:      ['dealerId'],
+  cms:      ['dealerRef'],
+  dealeros: ['dealerosToken', 'dealershipId'],
+  email:    ['recipientEmail'],
 };
 
 function validateDestinations(destinations) {
